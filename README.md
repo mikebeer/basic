@@ -12,6 +12,10 @@ program is tokenised once, blocks / labels / procedures / `DATA` are resolved in
 a link pass, and execution then walks the token array - so no text is scanned
 while the program runs.
 
+The full manual, in the style of a classic IBM publication, is in
+[`docs/BASIC-CREXX-Guide.docx`](docs/BASIC-CREXX-Guide.docx) (PDF copy:
+[`docs/BASIC-CREXX-Guide.pdf`](docs/BASIC-CREXX-Guide.pdf)).
+
 ## Running
 
 You need the `crexx` driver (`rxc`, `rxas`, `rxvm`) on your `PATH`, or point
@@ -88,5 +92,6 @@ significant digits (no single-precision rounding).
 |---|---|
 | `basic.crexx` | the interpreter |
 | `basic` | launcher script (compiles on first use) |
+| `docs/` | the Language Reference and User's Guide (Word and PDF) |
 | `examples/` | sample programs in both dialects |
 | `tests/` | regression programs with expected output (`tests/run_tests.sh`) |
