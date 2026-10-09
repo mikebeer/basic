@@ -1,0 +1,4987 @@
+/* =========================================================================
+   BASIC.CREXX  --  a BASIC interpreter written in CREXX (Level B)
+
+   Runs MS-style BASIC (GW-BASIC / QuickBASIC) programs, with a large part
+   of the FreeBASIC dialect on top: SUB/FUNCTION, SELECT CASE, DO/LOOP,
+   block IF, CONST, typed DIM ... AS, EXIT/CONTINUE, PRINT USING, file I/O.
+
+   Usage:
+       crexx basic.crexx -args program.bas [program arguments]
+       crexx basic.crexx -args -fb program.bas     (FreeBASIC print style)
+       crexx basic.crexx                           (interactive prompt)
+
+   The program text is tokenised once and "linked" (blocks, labels, DATA,
+   procedures resolved) before it is run, so execution does no text
+   scanning.  See README.md for the supported language.
+   ========================================================================= */
+options levelb numeric_classic
+import rxfnsb
+import rxfloat
+import _rxsysb
+namespace basic expose tk_t tk_n tk_s tk_k tk_f tk_x tk_y tk_l ntk,
+   ln_text ln_num ln_start nlines lmap nm nvars v_name v_kind v_n v_s v_isarr,
+   v_nd v_base v_lo v_hi v_proc v_const v_shared v_static pool_n pool_s npn nps,
+   np p_name p_pc p_body p_end p_isfn p_ret p_pfirst p_pcnt pp_slot pp_ref pp_arr,
+   pp_kind npp pl_first pl_cnt pl_slots cur_proc nfn fn_name fn_pc nd d_s d_q,
+   d_line dptr pc halted retflag err_flag err_code err_line on_err stmt_pc,
+   enter_clause unwind fsp f_slot f_end f_step f_pc gsp g_ret ssp s_n s_s s_t,
+   s_m svp sv_n sv_s sv_base sv_isarr sv_nd sv_lo sv_hi cfp cf_gsp cf_proc,
+   ab_n ab_s ab_t ab_slot ab_idx ab_cnt rn rs rt out_col out_file fl_id fl_mode,
+   fl_name fl_eof dial rnd_state rnd_last optbase dbg defkind kws fns prec,
+   cmdline prog_name pw_end val_ok wstack_n tk_dummy src_dir wd_width,
+   cur_row cur_col running last_error_text redo_flag in_repl kb_buf,
+   sort_dummy link_errs h_out h_in h_err fl_pend fl_has bare_flag ea_stop nopar lv_slot lv_idx inp_f inp_n res_pc f_for ansi mstmt rc_exit rp_n rp_t rp_cnt
+
+arg av = .string[]
+call init
+fname = ""
+cmdline = ""
+ia = 1
+do while ia <= av.0
+  oa = av[ia]
+  if fname == "" & left(oa, 1) == "-" & length(oa) > 1 then do
+    uo = upper(oa)
+    select
+      when uo == "-FB" then dial = 1
+      when uo == "-MS" | uo == "-QB" then dial = 0
+      when uo == "-DUMP" then dbg = 1
+      when uo == "-ANSI" then ansi = 1
+      when uo == "-H" | uo == "-HELP" | uo == "-?" then do
+        call usage
+        exit 0
+      end
+      otherwise do
+        say "basic: unknown option" oa
+        call usage
+        exit 1
+      end
+    end
+  end
+  else if fname == "" then fname = oa
+  else do
+    if cmdline == "" then cmdline = oa
+    else cmdline = cmdline || " " || oa
+  end
+  ia = ia + 1
+end
+
+if fname == "" then call repl
+else do
+  prog_name = fname
+  ok = load_program(fname)
+  if ok = 1 then ok = link_program()
+  if ok = 1 then do
+    if dbg = 1 then call dump_tokens
+    else call run_program
+  end
+  else exit 1
+end
+exit rc_exit
+
+usage: procedure = .void
+  say "BASIC interpreter in CREXX"
+  say "usage: crexx basic.crexx -args [-fb|-ms] [-dump] program.bas [args...]"
+  say "       crexx basic.crexx            (interactive)"
+  say "  -ms    MS BASIC output style (default): numbers print as ' 5 '"
+  say "  -fb    FreeBASIC output style: numbers print as ' 5'"
+  say "  -ansi  CLS / LOCATE / COLOR emit ANSI terminal escape codes"
+  say "  -dump  list the token stream instead of running"
+  return
+
+/* ---------------------------------------------------------------------
+   init: declare and initialise all module state
+   --------------------------------------------------------------------- */
+init: procedure = .void
+  tk_t = .int[]
+  tk_n = .float[]
+  tk_s = .string[]
+  tk_k = .int[]
+  tk_f = .int[]
+  tk_x = .int[]
+  tk_y = .int[]
+  tk_l = .int[]
+  ntk = 0
+  ln_text = .string[]
+  ln_num = .int[]
+  ln_start = .int[]
+  nlines = 0
+  lmap = .stem()
+  nm = .stem()
+  nvars = 0
+  v_name = .string[]
+  v_kind = .int[]
+  v_n = .float[]
+  v_s = .string[]
+  v_isarr = .int[]
+  v_nd = .int[]
+  v_base = .int[]
+  v_lo = .int[]
+  v_hi = .int[]
+  v_proc = .int[]
+  v_const = .int[]
+  v_shared = .int[]
+  v_static = .int[]
+  pool_n = .float[]
+  pool_s = .string[]
+  npn = 0
+  nps = 0
+  np = 0
+  p_name = .string[]
+  p_pc = .int[]
+  p_body = .int[]
+  p_end = .int[]
+  p_isfn = .int[]
+  p_ret = .int[]
+  p_pfirst = .int[]
+  p_pcnt = .int[]
+  pp_slot = .int[]
+  pp_ref = .int[]
+  pp_arr = .int[]
+  pp_kind = .int[]
+  npp = 0
+  pl_first = .int[]
+  pl_cnt = .int[]
+  pl_slots = .int[]
+  cur_proc = 0
+  nfn = 0
+  fn_name = .string[]
+  fn_pc = .int[]
+  nd = 0
+  d_s = .string[]
+  d_q = .int[]
+  d_line = .int[]
+  dptr = 1
+  pc = 1
+  halted = 0
+  retflag = 0
+  err_flag = 0
+  err_code = 0
+  err_line = 0
+  on_err = 0
+  stmt_pc = 1
+  enter_clause = 0
+  unwind = 0
+  fsp = 0
+  f_slot = .int[]
+  f_end = .float[]
+  f_step = .float[]
+  f_pc = .int[]
+  gsp = 0
+  g_ret = .int[]
+  ssp = 0
+  s_n = .float[]
+  s_s = .string[]
+  s_t = .int[]
+  s_m = .int[]
+  svp = 0
+  sv_n = .float[]
+  sv_s = .string[]
+  sv_base = .int[]
+  sv_isarr = .int[]
+  sv_nd = .int[]
+  sv_lo = .int[]
+  sv_hi = .int[]
+  cfp = 0
+  cf_gsp = .int[]
+  cf_proc = .int[]
+  ab_n = .float[]
+  ab_s = .string[]
+  ab_t = .int[]
+  ab_slot = .int[]
+  ab_idx = .int[]
+  ab_cnt = 0
+  rn = 0.0
+  rs = ""
+  rt = 0
+  out_col = 0
+  out_file = 0
+  fl_id = .int[]
+  fl_mode = .int[]
+  fl_name = .string[]
+  fl_eof = .int[]
+  fl_pend = .string[]
+  fl_has = .int[]
+  bare_flag = 0
+  rp_n = .int[]
+  rp_t = .string[]
+  rp_cnt = 0
+  lv_slot = 0
+  lv_idx = 0
+  inp_f = .string[]
+  inp_n = 0
+  res_pc = 1
+  f_for = .int[]
+  ansi = 0
+  mstmt = 1
+  rc_exit = 0
+  ea_stop = 0
+  do i = 1 to 255
+    fl_id[i] = 0
+    fl_mode[i] = 0
+    fl_name[i] = ""
+    fl_eof[i] = 0
+    fl_pend[i] = ""
+    fl_has[i] = 0
+  end
+  dial = 0
+  rnd_state = 1013904223
+  rnd_last = 0.5
+  optbase = 0
+  dbg = 0
+  defkind = .int[]
+  do i = 1 to 26
+    defkind[i] = 0
+  end
+  cmdline = ""
+  prog_name = ""
+  pw_end = 0
+  val_ok = 0
+  wd_width = 80
+  cur_row = 1
+  cur_col = 1
+  running = 0
+  last_error_text = ""
+  redo_flag = 0
+  in_repl = 0
+  kb_buf = ""
+  wstack_n = 0
+  tk_dummy = 0
+  src_dir = ""
+  sort_dummy = 0
+  link_errs = 0
+  h_out = _open("stdout", "w")
+  h_in = _open("stdin", "r")
+  h_err = _open("stderr", "w")
+  /* keyword list: statement words (operator words are listed separately) */
+  kws = " PRINT LET IF THEN ELSE ELSEIF ENDIF FOR TO STEP NEXT WHILE WEND DO LOOP UNTIL GOTO GOSUB RETURN ON ONERROR END STOP SYSTEM DIM REDIM ERASE DATA READ RESTORE DEF SWAP RANDOMIZE CLS LOCATE COLOR BEEP SLEEP OPEN CLOSE INPUT LINEINPUT WRITE CONST SUB FUNCTION ENDSUB ENDFUNCTION EXITFOR EXITDO EXITWHILE EXITSUB EXITFUNCTION EXITSELECT CONTFOR CONTDO CONTWHILE SELECTCASE CASE CASEELSE ENDSELECT CALL DECLARE SHARED AS BYVAL BYREF USING OPTION RESUME ERROR WIDTH SCREEN STATIC COMMON LOCAL SHELL KILL IS PRESERVE VIEW PALETTE DEFINT DEFSNG DEFDBL DEFSTR DEFLNG CLEAR LSET RSET "
+  fns = " ABS ASC ATN CDBL CHR CINT CLNG COS CSNG EXP FIX HEX INT LEFT LEN LOG LTRIM MID OCT RIGHT RND RTRIM SGN SIN SPACE SQR STR STRING TAN UCASE LCASE VAL INSTR TIMER DATE TIME INKEY INPUT EOF LOF FREEFILE ERR ERL FRE POS CSRLIN LBOUND UBOUND ASIN ACOS ATAN2 SINH COSH TANH LOG10 LOG2 TRIM INSTRREV IIF VALINT VALLNG COMMAND ENVIRON CURDIR FRAC CBOOL PEEK TAB SPC FORMAT BIN SQRT CINT ENVIRON MKI CVI LOC SEEK ATAN POW MAX MIN ISNUMERIC "
+  nopar = " TIMER DATE TIME RND INKEY ERR ERL FRE POS CSRLIN COMMAND CURDIR FREEFILE "
+  prec = .int[]
+  do i = 1 to 40
+    prec[i] = 0
+  end
+  prec[1] = 9
+  prec[2] = 9
+  prec[3] = 13
+  prec[4] = 13
+  prec[5] = 12
+  prec[6] = 15
+  prec[12] = 7
+  prec[13] = 7
+  prec[14] = 7
+  prec[15] = 7
+  prec[16] = 7
+  prec[17] = 7
+  prec[19] = 8
+  prec[31] = 5
+  prec[32] = 4
+  prec[33] = 3
+  prec[34] = 2
+  prec[35] = 1
+  prec[36] = 11
+  prec[37] = 10
+  prec[38] = 10
+  return
+
+/* ---------------------------------------------------------------------
+   Program loading
+   --------------------------------------------------------------------- */
+reset_program: procedure = .void
+  ntk = 0
+  nlines = 0
+  lmap = .stem()
+  nm = .stem()
+  nvars = 0
+  npn = 0
+  nps = 0
+  np = 0
+  npp = 0
+  cur_proc = 0
+  nfn = 0
+  nd = 0
+  dptr = 1
+  return
+
+load_program: procedure = .int
+  arg fn = .string
+  fid = .int
+  eof = .int
+  rcx = .int
+  line = .string
+  rmode = "r"
+  fid = 0
+  assembler fopen fid, fn, rmode
+  if fid = 0 then do
+    say "basic: cannot open" fn
+    return 0
+  end
+  call reset_program
+  eof = 0
+  do while eof = 0
+    line = ""
+    assembler freadline line, fid
+    assembler feof eof, fid
+    if eof > 0 & length(line) = 0 then leave
+    call add_line line
+  end
+  assembler fclose rcx, fid
+  return 1
+
+add_line: procedure = .void
+  arg txt = .string
+  if right(txt, 1) == '0d'x then txt = left(txt, length(txt) - 1)
+  nlines = nlines + 1
+  ln_text[nlines] = txt
+  call tokenize_line txt, nlines
+  return
+
+/* ---------------------------------------------------------------------
+   Character classes
+   --------------------------------------------------------------------- */
+isdigit: procedure = .int
+  arg c = .string
+  if c == "" then return 0
+  if c >>= "0" & c <<= "9" then return 1
+  return 0
+
+isletter: procedure = .int
+  arg c = .string
+  if c == "" then return 0
+  if c == "_" then return 1
+  u = upper(c)
+  if u >>= "A" & u <<= "Z" then return 1
+  return 0
+
+isalnum: procedure = .int
+  arg c = .string
+  if isletter(c) = 1 then return 1
+  if isdigit(c) = 1 then return 1
+  if c == "." then return 1
+  return 0
+
+/* next alphabetic word at or after position p0 (blanks skipped); sets pw_end */
+peekword: procedure = .string
+  arg txt = .string, p0 = .int
+  n = length(txt)
+  j = p0
+  do while j <= n & (substr(txt, j, 1) == " " | substr(txt, j, 1) == '09'x)
+    j = j + 1
+  end
+  k = j
+  do while k <= n & isletter(substr(txt, k, 1)) = 1
+    k = k + 1
+  end
+  pw_end = k
+  if k = j then return ""
+  return upper(substr(txt, j, k - j))
+
+/* next non-blank character at or after p0 */
+peekchar: procedure = .string
+  arg txt = .string, p0 = .int
+  n = length(txt)
+  j = p0
+  do while j <= n & (substr(txt, j, 1) == " " | substr(txt, j, 1) == '09'x)
+    j = j + 1
+  end
+  return substr(txt, j, 1)
+
+compound: procedure = .string
+  arg u = .string, txt = .string, p0 = .int
+  nw = peekword(txt, p0)
+  r = ""
+  if nw == "" then return ""
+  select
+    when u == "END" then do
+      if nw == "IF" then r = "ENDIF"
+      else if nw == "SUB" then r = "ENDSUB"
+      else if nw == "FUNCTION" then r = "ENDFUNCTION"
+      else if nw == "SELECT" then r = "ENDSELECT"
+    end
+    when u == "EXIT" then do
+      if nw == "FOR" then r = "EXITFOR"
+      else if nw == "DO" then r = "EXITDO"
+      else if nw == "WHILE" then r = "EXITWHILE"
+      else if nw == "SUB" then r = "EXITSUB"
+      else if nw == "FUNCTION" then r = "EXITFUNCTION"
+      else if nw == "SELECT" then r = "EXITSELECT"
+    end
+    when u == "CONTINUE" then do
+      if nw == "FOR" then r = "CONTFOR"
+      else if nw == "DO" then r = "CONTDO"
+      else if nw == "WHILE" then r = "CONTWHILE"
+    end
+    when u == "SELECT" then do
+      if nw == "CASE" then r = "SELECTCASE"
+    end
+    when u == "CASE" then do
+      if nw == "ELSE" then r = "CASEELSE"
+    end
+    when u == "LINE" then do
+      if nw == "INPUT" then r = "LINEINPUT"
+    end
+    when u == "GO" then do
+      if nw == "TO" then r = "GOTO"
+      else if nw == "SUB" then r = "GOSUB"
+    end
+    when u == "ON" then do
+      if nw == "ERROR" then r = "ONERROR"
+    end
+    otherwise nop
+  end
+  if r == "" then pw_end = p0
+  return r
+
+typekind: procedure = .int
+  arg w = .string
+  select
+    when w == "STRING" | w == "ZSTRING" | w == "WSTRING" then return 2
+    when w == "INTEGER" | w == "LONG" | w == "SHORT" | w == "BYTE" | w == "UBYTE" then return 1
+    when w == "USHORT" | w == "UINTEGER" | w == "ULONG" | w == "LONGINT" | w == "ULONGINT" | w == "BOOLEAN" then return 1
+    otherwise nop
+  end
+  return 0
+
+opcode: procedure = .int
+  arg t = .string
+  select
+    when t == "+" then return 1
+    when t == "-" then return 2
+    when t == "*" then return 3
+    when t == "/" then return 4
+    when t == "\" then return 5
+    when t == "^" then return 6
+    when t == "(" then return 7
+    when t == ")" then return 8
+    when t == "," then return 9
+    when t == ";" then return 10
+    when t == ":" then return 11
+    when t == "=" then return 12
+    when t == "<" then return 13
+    when t == ">" then return 14
+    when t == "<=" then return 15
+    when t == ">=" then return 16
+    when t == "<>" then return 17
+    when t == "#" then return 18
+    when t == "&" then return 19
+    when t == "AND" then return 31
+    when t == "OR" then return 32
+    when t == "XOR" then return 33
+    when t == "EQV" then return 34
+    when t == "IMP" then return 35
+    when t == "MOD" then return 36
+    when t == "SHL" then return 37
+    when t == "SHR" then return 38
+    when t == "NOT" then return 39
+    otherwise nop
+  end
+  return 0
+
+/* ---------------------------------------------------------------------
+   Variable slots
+   --------------------------------------------------------------------- */
+namekind: procedure = .int
+  arg nme = .string
+  b = nme
+  if right(b, 1) == "(" then b = left(b, length(b) - 1)
+  sx = right(b, 1)
+  if sx == "$" then return 2
+  if sx == "%" | sx == "&" then return 1
+  if sx == "!" | sx == "#" then return 0
+  lt0 = c2d(upper(left(b, 1))) - 64
+  if lt0 >= 1 & lt0 <= 26 then return defkind[lt0]
+  return 0
+
+newslot: procedure = .int
+  arg key = .string, nme = .string, owner = .int
+  s0 = .int
+  nvars = nvars + 1
+  s0 = nvars
+  v_name[s0] = nme
+  v_kind[s0] = namekind(nme)
+  v_n[s0] = 0.0
+  v_s[s0] = ""
+  v_isarr[s0] = 0
+  v_nd[s0] = 0
+  v_base[s0] = 0
+  v_proc[s0] = owner
+  v_const[s0] = 0
+  v_shared[s0] = 0
+  v_static[s0] = 0
+  do j = 1 to 3
+    v_lo[(s0 - 1) * 3 + j] = 0
+    v_hi[(s0 - 1) * 3 + j] = 0
+  end
+  nm[key] = s0
+  return s0
+
+/* sm: 0 normal, 1 shared, 2 static;  ak: forced kind or -1 */
+getslot: procedure = .int
+  arg key = .string, sm = .int, ak = .int
+  v = .string
+  lk = .string
+  s0 = .int
+  g0 = .int
+  if cur_proc > 0 then do
+    lk = p_name[cur_proc] || ":" || key
+    v = nm[lk]
+    if v \== "" then do
+      s0 = v as .int
+      if ak >= 0 then v_kind[s0] = ak
+      return s0
+    end
+    v = nm[key]
+    if v \== "" then do
+      g0 = v as .int
+      if v_shared[g0] = 1 then return g0
+    end
+    if sm = 1 then do
+      if v == "" then g0 = newslot(key, key, 0)
+      else g0 = v as .int
+      v_shared[g0] = 1
+      return g0
+    end
+    s0 = newslot(lk, key, cur_proc)
+    if sm = 2 then v_static[s0] = 1
+    if ak >= 0 then v_kind[s0] = ak
+    return s0
+  end
+  v = nm[key]
+  if v \== "" then s0 = v as .int
+  else s0 = newslot(key, key, 0)
+  if sm = 1 then v_shared[s0] = 1
+  if ak >= 0 then v_kind[s0] = ak
+  return s0
+
+emit: procedure = .void
+  arg ty = .int, nv = .float, sv = .string, kv = .int, fv = .int, li = .int
+  ntk = ntk + 1
+  tk_t[ntk] = ty
+  tk_n[ntk] = nv
+  tk_s[ntk] = sv
+  tk_k[ntk] = kv
+  tk_f[ntk] = fv
+  tk_x[ntk] = 0
+  tk_y[ntk] = 0
+  tk_l[ntk] = li
+  return
+
+numtofloat: procedure = .float
+  arg w = .string
+  t = w
+  if left(t, 1) == "." then t = "0" || t
+  p = pos(".", t)
+  if p > 0 then do
+    if p = length(t) then t = t || "0"
+    else if substr(t, p + 1, 1) == "e" | substr(t, p + 1, 1) == "E" then t = left(t, p) || "0" || substr(t, p + 1)
+  end
+  return t as .float
+
+/* ---------------------------------------------------------------------
+   The tokenizer: one source line -> tokens
+   token types: 1 NUM 2 STR 3 ID 4 KW 5 OP 6 EOL 7 END 8 TYP
+   --------------------------------------------------------------------- */
+tokenize_line: procedure = .void
+  arg txt = .string, li = .int
+  n = length(txt)
+  i = 1
+  c = .string
+  c2 = .string
+  u = .string
+  bu = .string
+  w = .string
+  e = .string
+  sx = .string
+  nx = .string
+  lastkw = .string
+  j = .int
+  k = .int
+  fi = .int
+  slot = .int
+  ls = .int
+  depth = .int
+  atstart = .int
+  smode = .int
+  asknd = .int
+  want_proc = .int
+  lastkwpos = .int
+  inhdr = .int
+  kd = .int
+  isarr = .int
+  nv = .float
+  ln_start[li] = ntk + 1
+  ln_num[li] = -1
+  ls = 0
+  depth = 0
+  atstart = 1
+  smode = 0
+  asknd = -1
+  want_proc = 0
+  lastkwpos = 0
+  inhdr = 0
+  lastkw = ""
+  /* optional line number */
+  do while i <= n & (substr(txt, i, 1) == " " | substr(txt, i, 1) == '09'x)
+    i = i + 1
+  end
+  j = i
+  do while j <= n & isdigit(substr(txt, j, 1)) = 1
+    j = j + 1
+  end
+  if j > i then do
+    w = substr(txt, i, j - i)
+    ln_num[li] = w as .int
+    k = w as .int
+    lmap[k as .string] = li
+    i = j
+    atstart = 1
+  end
+  else if substr(txt, i, 1) == "#" then do
+    /* #include / #define etc. are not supported: ignore the line */
+    i = n + 1
+  end
+  do while i <= n
+    c = substr(txt, i, 1)
+    if c == " " | c == '09'x then do
+      i = i + 1
+      iterate
+    end
+    if c == "'" then leave
+    c2 = substr(txt, i, 2)
+    /* ---------- numbers ---------- */
+    if isdigit(c) = 1 | (c == "." & isdigit(substr(txt, i + 1, 1)) = 1) then do
+      j = i
+      do while j <= n & isdigit(substr(txt, j, 1)) = 1
+        j = j + 1
+      end
+      if j <= n & substr(txt, j, 1) == "." then do
+        j = j + 1
+        do while j <= n & isdigit(substr(txt, j, 1)) = 1
+          j = j + 1
+        end
+      end
+      if j <= n then do
+        e = upper(substr(txt, j, 1))
+        if e == "E" | e == "D" then do
+          k = j + 1
+          if k <= n & (substr(txt, k, 1) == "+" | substr(txt, k, 1) == "-") then k = k + 1
+          if k <= n & isdigit(substr(txt, k, 1)) = 1 then do
+            j = k
+            do while j <= n & isdigit(substr(txt, j, 1)) = 1
+              j = j + 1
+            end
+          end
+        end
+      end
+      w = translate(upper(substr(txt, i, j - i)), "E", "D")
+      nv = numtofloat(w)
+      i = j
+      /* optional type suffix on literals */
+      sx = substr(txt, i, 1)
+      if sx == "%" | sx == "!" | sx == "#" then i = i + 1
+      else if sx == "&" & isalnum(substr(txt, i + 1, 1)) = 0 then i = i + 1
+      call emit 1, nv, "", 0, 0, li
+      atstart = 0
+      iterate
+    end
+    /* ---------- &H &O &B literals ---------- */
+    if c == "&" then do
+      sx = upper(substr(txt, i + 1, 1))
+      if sx == "H" | sx == "O" | sx == "B" then do
+        j = i + 2
+        do while j <= n & isalnum(substr(txt, j, 1)) = 1
+          j = j + 1
+        end
+        w = upper(substr(txt, i + 2, j - i - 2))
+        if right(w, 1) == "&" then w = left(w, length(w) - 1)
+        if w == "" then w = "0"
+        if sx == "H" then nv = x2d(w)
+        else if sx == "B" then nv = b2d(w)
+        else nv = reradix(w, 8, 10) as .float
+        i = j
+        if substr(txt, i, 1) == "&" then i = i + 1
+        call emit 1, nv, "", 0, 0, li
+        atstart = 0
+        iterate
+      end
+    end
+    /* ---------- strings ---------- */
+    if c == '"' then do
+      w = ""
+      j = i + 1
+      do forever
+        if j > n then leave
+        e = substr(txt, j, 1)
+        if e == '"' then do
+          if substr(txt, j + 1, 1) == '"' then do
+            w = w || '"'
+            j = j + 2
+            iterate
+          end
+          leave
+        end
+        w = w || e
+        j = j + 1
+      end
+      i = j + 1
+      call emit 2, 0.0, w, 0, 0, li
+      atstart = 0
+      iterate
+    end
+    /* ---------- identifiers and keywords ---------- */
+    if isletter(c) = 1 then do
+      j = i
+      do while j <= n & isalnum(substr(txt, j, 1)) = 1
+        j = j + 1
+      end
+      w = substr(txt, i, j - i)
+      sx = substr(txt, j, 1)
+      if sx == "$" | sx == "%" | sx == "!" | sx == "#" then do
+        w = w || sx
+        j = j + 1
+      end
+      else if sx == "&" & substr(txt, j + 1, 1) \== "&" then do
+        /* long suffix, but not the string-concatenation operator */
+        if isalnum(peekchar(txt, j + 1)) = 0 & peekchar(txt, j + 1) \== '"' & peekchar(txt, j + 1) \== "(" then do
+          w = w || sx
+          j = j + 1
+        end
+      end
+      i = j
+      u = upper(w)
+      if u == "REM" then leave
+      /* label? */
+      if atstart = 1 & substr(txt, i, 1) == ":" & wordpos(u, kws) = 0 then do
+        lmap[u] = li
+        i = i + 1
+        iterate
+      end
+      atstart = 0
+      /* compound keywords */
+      if u == "END" | u == "EXIT" | u == "CONTINUE" | u == "SELECT" | u == "CASE" | u == "LINE" | u == "GO" | u == "ON" then do
+        k = pw_end
+        w = compound(u, txt, i)
+        if w \== "" then do
+          u = w
+          i = pw_end
+        end
+      end
+      /* operator words */
+      kd = opcode(u)
+      if kd >= 31 then do
+        call emit 5, 0.0, u, kd, 0, li
+        iterate
+      end
+      /* statement keywords */
+      if wordpos(u, kws) > 0 then do
+        if u == "DECLARE" then do
+          i = n + 1
+          iterate
+        end
+        if u == "DEFINT" | u == "DEFSNG" | u == "DEFDBL" | u == "DEFSTR" | u == "DEFLNG" then do
+          call do_defxxx u, substr(txt, i)
+          i = n + 1
+          iterate
+        end
+        if u == "DATA" then nop
+        if u == "AS" & lastkw \== "OPEN" then do
+          nx = peekword(txt, i)
+          if nx == "UNSIGNED" then do
+            i = pw_end
+            nx = peekword(txt, i)
+          end
+          if nx \== "" then do
+            i = pw_end
+            kd = typekind(nx)
+            if nx == "LONG" & peekword(txt, i) == "LONG" then i = pw_end
+            if (nx == "STRING" | nx == "ZSTRING") & peekchar(txt, i) == "*" then do
+              /* fixed length string: skip '* n' */
+              j = i
+              do while j <= n & substr(txt, j, 1) \== "*"
+                j = j + 1
+              end
+              j = j + 1
+              do while j <= n & (substr(txt, j, 1) == " " | isdigit(substr(txt, j, 1)) = 1)
+                j = j + 1
+              end
+              i = j
+            end
+            if peekword(txt, i) == "PTR" then i = pw_end
+            call emit 4, 0.0, "AS", wordpos("AS", kws), 0, li
+            call emit 8, 0.0, nx, kd, 0, li
+            if lastkwpos = ntk - 2 & (lastkw == "DIM" | lastkw == "REDIM" | lastkw == "SHARED" | lastkw == "STATIC" | lastkw == "COMMON" | lastkw == "LOCAL" | lastkw == "CONST") then asknd = kd
+            else if ls > 0 then v_kind[ls] = kd
+            iterate
+          end
+        end
+        if u == "SHARED" then smode = 1
+        if u == "STATIC" & cur_proc > 0 then smode = 2
+        if u == "SUB" & cur_proc = 0 then want_proc = 1
+        if u == "CONST" & cur_proc = 0 then smode = 1
+        if u == "FUNCTION" & cur_proc = 0 then want_proc = 2
+        if u == "ENDSUB" | u == "ENDFUNCTION" then do
+          call emit 4, 0.0, u, wordpos(u, kws), 0, li
+          cur_proc = 0
+          iterate
+        end
+        call emit 4, 0.0, u, wordpos(u, kws), 0, li
+        lastkw = u
+        lastkwpos = ntk
+        if u == "DATA" then do
+          i = capture_data(txt, i, li)
+          iterate
+        end
+        iterate
+      end
+      /* builtin functions */
+      bu = u
+      if right(bu, 1) == "$" then bu = left(bu, length(bu) - 1)
+      if want_proc = 0 then do
+        fi = wordpos(bu, fns)
+        if fi > 0 & peekchar(txt, i) \== "(" & wordpos(bu, nopar) = 0 then fi = 0
+        if fi > 0 then do
+          call emit 3, 0.0, bu, 0, fi, li
+          iterate
+        end
+      end
+      /* identifier */
+      isarr = 0
+      if peekchar(txt, i) == "(" then isarr = 1
+      if want_proc > 0 then do
+        np = np + 1
+        p_name[np] = u
+        p_isfn[np] = want_proc - 1
+        p_pc[np] = ntk
+        p_body[np] = 0
+        p_end[np] = 0
+        p_ret[np] = 0
+        p_pfirst[np] = 0
+        p_pcnt[np] = 0
+        cur_proc = np
+        if want_proc = 2 then do
+          slot = getslot(u, 0, -1)
+          p_ret[np] = slot
+          ls = slot
+        end
+        else slot = 0
+        want_proc = 0
+        inhdr = 1
+        call emit 3, 0.0, u, slot, 0, li
+        iterate
+      end
+      if isarr = 1 then slot = getslot(u || "(", smode, asknd)
+      else slot = getslot(u, smode, asknd)
+      if depth = 0 | (inhdr = 1 & depth = 1) then ls = slot
+      call emit 3, 0.0, u, slot, 0, li
+      tk_x[ntk] = isarr
+      iterate
+    end
+    /* ---------- operators and punctuation ---------- */
+    if c2 == "<=" | c2 == "=<" then do
+      call emit 5, 0.0, "<=", 15, 0, li
+      i = i + 2
+    end
+    else if c2 == ">=" | c2 == "=>" then do
+      call emit 5, 0.0, ">=", 16, 0, li
+      i = i + 2
+    end
+    else if c2 == "<>" | c2 == "><" then do
+      call emit 5, 0.0, "<>", 17, 0, li
+      i = i + 2
+    end
+    else if c == "?" then do
+      call emit 4, 0.0, "PRINT", wordpos("PRINT", kws), 0, li
+      lastkw = "PRINT"
+      i = i + 1
+    end
+    else do
+      kd = opcode(c)
+      if kd = 7 then depth = depth + 1
+      if kd = 8 then do
+        depth = depth - 1
+        if depth = 0 & inhdr = 1 then do
+          if p_isfn[cur_proc] = 1 then ls = p_ret[cur_proc]
+          else ls = 0
+        end
+      end
+      if kd = 11 | kd = 9 then do
+        if kd = 11 then do
+          smode = 0
+          asknd = -1
+          lastkw = ""
+        end
+      end
+      call emit 5, 0.0, c, kd, 0, li
+      i = i + 1
+    end
+  end
+  call emit 6, 0.0, "", 0, 0, li
+  return
+
+do_defxxx: procedure = .void
+  arg kw = .string, rest = .string
+  kd = .int
+  a = .int
+  b = .int
+  m = length(rest)
+  i = 1
+  c = .string
+  if kw == "DEFSTR" then kd = 2
+  else if kw == "DEFINT" | kw == "DEFLNG" then kd = 1
+  else kd = 0
+  do while i <= m
+    c = upper(substr(rest, i, 1))
+    if c >>= "A" & c <<= "Z" then do
+      a = c2d(c) - 64
+      b = a
+      i = i + 1
+      if substr(rest, i, 1) == "-" then do
+        c = upper(substr(rest, i + 1, 1))
+        if c >>= "A" & c <<= "Z" then b = c2d(c) - 64
+        i = i + 2
+      end
+      do while a <= b
+        defkind[a] = kd
+        a = a + 1
+      end
+    end
+    else i = i + 1
+  end
+  return
+
+/* DATA items: captured at tokenize time; returns the position after the DATA text */
+capture_data: procedure = .int
+  arg txt = .string, p0 = .int, li = .int
+  n = length(txt)
+  i = p0
+  c = .string
+  w = .string
+  q = .int
+  inq = .int
+  have = .int
+  /* leading blanks */
+  do while i <= n & (substr(txt, i, 1) == " " | substr(txt, i, 1) == '09'x)
+    i = i + 1
+  end
+  have = 0
+  w = ""
+  q = 0
+  inq = 0
+  do while i <= n
+    c = substr(txt, i, 1)
+    if inq = 1 then do
+      if c == '"' then inq = 0
+      else w = w || c
+      i = i + 1
+      iterate
+    end
+    if c == '"' then do
+      inq = 1
+      q = 1
+      have = 1
+      i = i + 1
+      iterate
+    end
+    if c == "," then do
+      call add_data w, q, li
+      w = ""
+      q = 0
+      have = 0
+      i = i + 1
+      do while i <= n & (substr(txt, i, 1) == " " | substr(txt, i, 1) == '09'x)
+        i = i + 1
+      end
+      iterate
+    end
+    if c == ":" then leave
+    if c == "'" & q = 0 then do
+      i = n + 1
+      leave
+    end
+    w = w || c
+    have = 1
+    i = i + 1
+  end
+  if q = 0 then w = strip(w)
+  call add_data w, q, li
+  return i
+
+add_data: procedure = .void
+  arg w = .string, q = .int, li = .int
+  nd = nd + 1
+  d_s[nd] = w
+  d_q[nd] = q
+  d_line[nd] = li
+  return
+
+/* ---------------------------------------------------------------------
+   The link pass: resolve blocks, procedures, DEF FN, parameters
+   --------------------------------------------------------------------- */
+stmt_end: procedure = .int
+  arg q0 = .int
+  q = q0
+  do while tk_t[q] \= 6 & tk_t[q] \= 7
+    if tk_t[q] = 5 & tk_k[q] = 11 then leave
+    q = q + 1
+  end
+  return q
+
+line_end: procedure = .int
+  arg q0 = .int
+  q = q0
+  do while tk_t[q] \= 6 & tk_t[q] \= 7
+    q = q + 1
+  end
+  return q
+
+line_label: procedure = .string
+  arg tp = .int
+  li = tk_l[tp]
+  if li < 1 then return "?"
+  if ln_num[li] >= 0 then return "line " || ln_num[li]
+  return "source line " || li
+
+link_error: procedure = .void
+  arg msg = .string, tp = .int
+  say "basic: " || msg || " at " || line_label(tp)
+  link_errs = link_errs + 1
+  return
+
+find_proc: procedure = .int
+  arg nme = .string
+  do j = 1 to np
+    if p_name[j] == nme then return j
+  end
+  return 0
+
+find_fn: procedure = .int
+  arg nme = .string
+  do j = 1 to nfn
+    if fn_name[j] == nme then return j
+  end
+  return 0
+
+link_program: procedure = .int
+  bk = .int[]
+  bp = .int[]
+  bc = .int[]
+  sp = .int
+  p = .int
+  q = .int
+  r = .int
+  e = .int
+  dd = .int
+  j = .int
+  jj = .int
+  kwant = .int
+  cnt = .int
+  kw = .string
+  link_errs = 0
+  sp = 0
+  if tk_t[ntk] \= 7 then call emit 7, 0.0, "", 0, 0, nlines
+  p = 1
+  do while p <= ntk
+    if tk_t[p] \= 4 then do
+      p = p + 1
+      iterate
+    end
+    kw = tk_s[p]
+    select
+      when kw == "IF" then do
+        q = p + 1
+        do while tk_t[q] \= 6 & tk_t[q] \= 7
+          if tk_t[q] = 4 & (tk_s[q] == "THEN" | tk_s[q] == "GOTO") then leave
+          q = q + 1
+        end
+        if tk_t[q] \= 4 then call link_error "IF without THEN", p
+        else if tk_s[q] == "THEN" & tk_t[q + 1] = 6 then do
+          sp = sp + 1
+          bk[sp] = 1
+          bp[sp] = p
+          bc[sp] = p
+          tk_x[p] = 0
+        end
+        else do
+          tk_x[p] = 1
+          dd = 0
+          e = 0
+          r = q + 1
+          do while tk_t[r] \= 6 & tk_t[r] \= 7
+            if tk_t[r] = 4 then do
+              if tk_s[r] == "IF" then dd = dd + 1
+              else if tk_s[r] == "ELSE" then do
+                if dd = 0 then do
+                  e = r
+                  leave
+                end
+                dd = dd - 1
+              end
+            end
+            r = r + 1
+          end
+          if e > 0 then do
+            tk_y[p] = e + 1
+            tk_x[e] = line_end(e)
+          end
+          else tk_y[p] = r
+        end
+      end
+      when kw == "ELSEIF" | kw == "ELSE" then do
+        if kw == "ELSE" & tk_x[p] > 0 then nop
+        else if sp = 0 then call link_error kw || " without IF", p
+        else if bk[sp] \= 1 then call link_error kw || " without IF", p
+        else do
+          tk_y[bc[sp]] = p
+          bc[sp] = p
+        end
+      end
+      when kw == "ENDIF" then do
+        if sp = 0 then call link_error "END IF without IF", p
+        else if bk[sp] \= 1 then call link_error "END IF without IF", p
+        else do
+          tk_y[bc[sp]] = p
+          q = bp[sp]
+          do while q \= p
+            r = tk_y[q]
+            if tk_t[r] = 4 & (tk_s[r] == "ELSEIF" | tk_s[r] == "ELSE") then tk_x[r] = p
+            q = r
+          end
+          sp = sp - 1
+        end
+      end
+      when kw == "WHILE" & p > 1 & tk_t[p - 1] = 4 & (tk_s[p - 1] == "DO" | tk_s[p - 1] == "LOOP") then nop
+      when kw == "WHILE" then do
+        sp = sp + 1
+        bk[sp] = 2
+        bp[sp] = p
+        bc[sp] = 0
+      end
+      when kw == "WEND" then do
+        if sp = 0 then call link_error "WEND without WHILE", p
+        else if bk[sp] \= 2 then call link_error "WEND without WHILE", p
+        else do
+          tk_x[bp[sp]] = p + 1
+          tk_x[p] = bp[sp]
+          sp = sp - 1
+        end
+      end
+      when kw == "DO" then do
+        sp = sp + 1
+        bk[sp] = 3
+        bp[sp] = p
+        bc[sp] = 0
+      end
+      when kw == "LOOP" then do
+        if sp = 0 then call link_error "LOOP without DO", p
+        else if bk[sp] \= 3 then call link_error "LOOP without DO", p
+        else do
+          tk_x[bp[sp]] = stmt_end(p)
+          tk_y[bp[sp]] = p
+          tk_x[p] = bp[sp]
+          sp = sp - 1
+        end
+      end
+      when kw == "FOR" & p > 1 & tk_t[p - 1] \= 6 & (tk_t[p - 1] \= 5 | tk_k[p - 1] \= 11) & (tk_t[p - 1] \= 4 | (tk_s[p - 1] \== "THEN" & tk_s[p - 1] \== "ELSE")) then nop
+      when kw == "FOR" then do
+        sp = sp + 1
+        bk[sp] = 4
+        bp[sp] = p
+        bc[sp] = 0
+      end
+      when kw == "NEXT" & p > 1 & tk_t[p - 1] = 4 & tk_s[p - 1] == "RESUME" then nop
+      when kw == "NEXT" then do
+        /* count the variables of NEXT i, j */
+        cnt = 0
+        q = p + 1
+        dd = 0
+        do while tk_t[q] \= 6 & tk_t[q] \= 7
+          if tk_t[q] = 5 & tk_k[q] = 11 then leave
+          if tk_t[q] = 3 & dd = 0 then cnt = cnt + 1
+          if tk_t[q] = 5 & tk_k[q] = 7 then dd = dd + 1
+          if tk_t[q] = 5 & tk_k[q] = 8 then dd = dd - 1
+          q = q + 1
+        end
+        if cnt < 1 then cnt = 1
+        do j = 1 to cnt
+          if sp = 0 then do
+            call link_error "NEXT without FOR", p
+            leave
+          end
+          if bk[sp] \= 4 then do
+            call link_error "NEXT without FOR", p
+            leave
+          end
+          tk_x[bp[sp]] = q
+          tk_y[bp[sp]] = p
+          sp = sp - 1
+        end
+      end
+      when kw == "SELECTCASE" then do
+        sp = sp + 1
+        bk[sp] = 5
+        bp[sp] = p
+        bc[sp] = p
+      end
+      when kw == "CASE" | kw == "CASEELSE" then do
+        if sp = 0 then call link_error "CASE without SELECT CASE", p
+        else if bk[sp] \= 5 then call link_error "CASE without SELECT CASE", p
+        else do
+          tk_y[bc[sp]] = p
+          bc[sp] = p
+        end
+      end
+      when kw == "ENDSELECT" then do
+        if sp = 0 then call link_error "END SELECT without SELECT CASE", p
+        else if bk[sp] \= 5 then call link_error "END SELECT without SELECT CASE", p
+        else do
+          tk_y[bc[sp]] = p
+          tk_x[bp[sp]] = p
+          q = tk_y[bp[sp]]
+          do while q \= p
+            tk_x[q] = p
+            q = tk_y[q]
+          end
+          sp = sp - 1
+        end
+      end
+      when (kw == "SUB" | kw == "FUNCTION") & tk_t[p + 1] = 5 & tk_k[p + 1] = 12 then nop
+      when kw == "SUB" | kw == "FUNCTION" then do
+        sp = sp + 1
+        if kw == "SUB" then bk[sp] = 6
+        else bk[sp] = 7
+        bp[sp] = p
+        bc[sp] = 0
+        j = 0
+        do jj = 1 to np
+          if p_pc[jj] = p then j = jj
+        end
+        if j > 0 then do
+          p_body[j] = line_end(p) + 1
+          bc[sp] = j
+        end
+      end
+      when kw == "ENDSUB" | kw == "ENDFUNCTION" then do
+        if sp = 0 then call link_error "END SUB/FUNCTION without SUB/FUNCTION", p
+        else if bk[sp] < 6 then call link_error "END SUB/FUNCTION without SUB/FUNCTION", p
+        else do
+          tk_x[bp[sp]] = p + 1
+          if bc[sp] > 0 then p_end[bc[sp]] = p
+          sp = sp - 1
+        end
+      end
+      when kw == "EXITFOR" | kw == "CONTFOR" | kw == "EXITDO" | kw == "CONTDO" | kw == "EXITWHILE" | kw == "CONTWHILE" | kw == "EXITSELECT" then do
+        if kw == "EXITFOR" | kw == "CONTFOR" then kwant = 4
+        else if kw == "EXITDO" | kw == "CONTDO" then kwant = 3
+        else if kw == "EXITWHILE" | kw == "CONTWHILE" then kwant = 2
+        else kwant = 5
+        j = sp
+        do while j >= 1
+          if bk[j] = kwant then leave
+          j = j - 1
+        end
+        if j = 0 then call link_error kw || " outside of a matching block", p
+        else tk_x[p] = bp[j]
+      end
+      when kw == "DEF" then do
+        if tk_t[p + 1] = 3 then do
+          nfn = nfn + 1
+          fn_name[nfn] = tk_s[p + 1]
+          fn_pc[nfn] = p + 2
+          tk_x[p] = stmt_end(p)
+        end
+      end
+      otherwise nop
+    end
+    p = p + 1
+  end
+  if sp > 0 then do
+    do while sp > 0
+      call link_error "block not closed (" || tk_s[bp[sp]] || ")", bp[sp]
+      sp = sp - 1
+    end
+  end
+  /* parameter tables */
+  npp = 0
+  do j = 1 to np
+    p_pfirst[j] = npp + 1
+    p_pcnt[j] = 0
+    q = p_pc[j] + 2
+    if tk_t[q] = 5 & tk_k[q] = 7 then do
+      q = q + 1
+      r = 1
+      do while tk_t[q] \= 6 & tk_t[q] \= 7
+        if tk_t[q] = 5 & tk_k[q] = 8 then leave
+        if tk_t[q] = 4 & tk_s[q] == "BYVAL" then r = 0
+        else if tk_t[q] = 4 & tk_s[q] == "BYREF" then r = 1
+        else if tk_t[q] = 3 then do
+          npp = npp + 1
+          p_pcnt[j] = p_pcnt[j] + 1
+          pp_slot[npp] = tk_k[q]
+          pp_ref[npp] = r
+          pp_arr[npp] = 0
+          pp_kind[npp] = v_kind[tk_k[q]]
+          if tk_x[q] = 1 then do
+            pp_arr[npp] = 1
+            q = q + 2
+          end
+          r = 1
+        end
+        q = q + 1
+      end
+    end
+  end
+  /* per-procedure lists of local slots (saved/restored around calls) */
+  cnt = 0
+  do j = 1 to np
+    pl_first[j] = cnt + 1
+    pl_cnt[j] = 0
+    do q = 1 to nvars
+      if v_proc[q] = j & v_static[q] = 0 then do
+        cnt = cnt + 1
+        pl_slots[cnt] = q
+        pl_cnt[j] = pl_cnt[j] + 1
+      end
+    end
+  end
+  if link_errs > 0 then return 0
+  return 1
+
+/* ---------------------------------------------------------------------
+   Errors
+   --------------------------------------------------------------------- */
+rt_error: procedure = .void
+  arg code = .int, msg = .string
+  li = .int
+  if err_flag = 1 then return
+  err_flag = 1
+  err_code = code
+  last_error_text = msg
+  li = tk_l[stmt_pc]
+  if li >= 1 then do
+    if ln_num[li] >= 0 then err_line = ln_num[li]
+    else err_line = li
+  end
+  else err_line = 0
+  return
+
+syn: procedure = .void
+  call rt_error 2, "Syntax error"
+  return
+
+/* ---------------------------------------------------------------------
+   Numbers
+   --------------------------------------------------------------------- */
+toint: procedure = .int
+  arg x = .float
+  r = .float
+  d = .float
+  if x \= x then return 0
+  if x > 9.2e18 then return 9200000000000000000
+  if x < -9.2e18 then return -9200000000000000000
+  r = rxfloat..floor(x)
+  d = x - r
+  if d > 0.5 then r = r + 1
+  else if d = 0.5 then do
+    if rxfloat..fmod(r, 2.0) \= 0 then r = r + 1
+  end
+  return r as .int
+
+fixint: procedure = .int
+  arg x = .float
+  if x \= x then return 0
+  if x > 9.2e18 then return 9200000000000000000
+  if x < -9.2e18 then return -9200000000000000000
+  return rxfloat..trunc(x) as .int
+
+fmtnum: procedure = .string
+  arg x = .float
+  iv = .int
+  s = .string
+  if x = 0 then return "0"
+  if x \= x then return "nan"
+  if rxfloat..fabs(x) < 1e15 & rxfloat..floor(x) = x then do
+    iv = x as .int
+    return iv as .string
+  end
+  s = x as .string
+  return translate(s, "E", "e")
+
+/* ---------------------------------------------------------------------
+   Arrays
+   --------------------------------------------------------------------- */
+dim_array: procedure = .void
+  arg slot = .int, nd0 = .int, l1 = .int, h1 = .int, l2 = .int, h2 = .int, l3 = .int, h3 = .int
+  tot = .int
+  b = .int
+  i = .int
+  b = (slot - 1) * 3
+  if h1 < l1 then do
+    call rt_error 9, "Subscript out of range"
+    return
+  end
+  if nd0 >= 2 & h2 < l2 then do
+    call rt_error 9, "Subscript out of range"
+    return
+  end
+  if nd0 >= 3 & h3 < l3 then do
+    call rt_error 9, "Subscript out of range"
+    return
+  end
+  tot = h1 - l1 + 1
+  if nd0 >= 2 then tot = tot * (h2 - l2 + 1)
+  if nd0 >= 3 then tot = tot * (h3 - l3 + 1)
+  if tot > 30000000 then do
+    call rt_error 7, "Out of memory"
+    return
+  end
+  v_lo[b + 1] = l1
+  v_hi[b + 1] = h1
+  v_lo[b + 2] = l2
+  v_hi[b + 2] = h2
+  v_lo[b + 3] = l3
+  v_hi[b + 3] = h3
+  v_nd[slot] = nd0
+  v_isarr[slot] = 1
+  if v_kind[slot] = 2 then do
+    v_base[slot] = nps + 1
+    do i = 1 to tot
+      nps = nps + 1
+      pool_s[nps] = ""
+    end
+  end
+  else do
+    v_base[slot] = npn + 1
+    do i = 1 to tot
+      npn = npn + 1
+      pool_n[npn] = 0.0
+    end
+  end
+  return
+
+auto_dim: procedure = .void
+  arg slot = .int, nsub = .int
+  if nsub = 1 then call dim_array slot, 1, optbase, 10, 0, 0, 0, 0
+  else if nsub = 2 then call dim_array slot, 2, optbase, 10, optbase, 10, 0, 0
+  else call dim_array slot, 3, optbase, 10, optbase, 10, optbase, 10
+  return
+
+/* parse (i, j, k) at pc and return the pool index of the element */
+arr_index: procedure = .int
+  arg slot = .int
+  nsub = .int
+  i1 = .int
+  i2 = .int
+  i3 = .int
+  b = .int
+  idx = .int
+  nsub = 0
+  i1 = 0
+  i2 = 0
+  i3 = 0
+  pc = pc + 1
+  do forever
+    call ex_prec 1
+    if rt = 1 then do
+      call rt_error 13, "Type mismatch"
+      return 0
+    end
+    nsub = nsub + 1
+    if nsub = 1 then i1 = toint(rn)
+    else if nsub = 2 then i2 = toint(rn)
+    else if nsub = 3 then i3 = toint(rn)
+    else do
+      call syn
+      return 0
+    end
+    if tk_t[pc] = 5 & tk_k[pc] = 9 then pc = pc + 1
+    else leave
+  end
+  call need_rparen
+  if err_flag = 1 then return 0
+  if v_isarr[slot] = 0 then call auto_dim slot, nsub
+  if err_flag = 1 then return 0
+  if nsub \= v_nd[slot] then do
+    call rt_error 9, "Subscript out of range"
+    return 0
+  end
+  b = (slot - 1) * 3
+  if i1 < v_lo[b + 1] | i1 > v_hi[b + 1] then do
+    call rt_error 9, "Subscript out of range"
+    return 0
+  end
+  idx = i1 - v_lo[b + 1]
+  if nsub >= 2 then do
+    if i2 < v_lo[b + 2] | i2 > v_hi[b + 2] then do
+      call rt_error 9, "Subscript out of range"
+      return 0
+    end
+    idx = idx * (v_hi[b + 2] - v_lo[b + 2] + 1) + (i2 - v_lo[b + 2])
+  end
+  if nsub >= 3 then do
+    if i3 < v_lo[b + 3] | i3 > v_hi[b + 3] then do
+      call rt_error 9, "Subscript out of range"
+      return 0
+    end
+    idx = idx * (v_hi[b + 3] - v_lo[b + 3] + 1) + (i3 - v_lo[b + 3])
+  end
+  return v_base[slot] + idx
+
+need_rparen: procedure = .void
+  if tk_t[pc] = 5 & tk_k[pc] = 8 then pc = pc + 1
+  else call rt_error 2, "Syntax error: ')' expected"
+  return
+
+need_op: procedure = .void
+  arg k = .int
+  if tk_t[pc] = 5 & tk_k[pc] = k then pc = pc + 1
+  else call rt_error 2, "Syntax error"
+  return
+
+/* ---------------------------------------------------------------------
+   Expression evaluation (precedence climbing); result in rn / rs / rt
+   --------------------------------------------------------------------- */
+ex_prec: procedure = .void
+  arg minp = .int
+  ln = .float
+  ls = .string
+  lt = .int
+  k = .int
+  p = .int
+  call ex_unary
+  do forever
+    if tk_t[pc] \= 5 then leave
+    k = tk_k[pc]
+    p = prec[k]
+    if p = 0 | p < minp then leave
+    pc = pc + 1
+    ln = rn
+    ls = rs
+    lt = rt
+    call ex_prec p + 1
+    call binop k, ln, ls, lt
+  end
+  return
+
+ex_unary: procedure = .void
+  t = .int
+  k = .int
+  a = .int
+  t = tk_t[pc]
+  if t = 1 then do
+    rn = tk_n[pc]
+    rt = 0
+    pc = pc + 1
+    return
+  end
+  if t = 2 then do
+    rs = tk_s[pc]
+    rt = 1
+    pc = pc + 1
+    return
+  end
+  if t = 3 then do
+    if tk_y[pc] = 100000000 & tk_x[pc] = 0 & tk_f[pc] = 0 then do
+      k = tk_k[pc]
+      if v_kind[k] = 2 then do
+        rs = v_s[k]
+        rt = 1
+      end
+      else do
+        rn = v_n[k]
+        rt = 0
+      end
+      pc = pc + 1
+      return
+    end
+    call ex_id
+    return
+  end
+  if t = 5 then do
+    k = tk_k[pc]
+    if k = 7 then do
+      pc = pc + 1
+      call ex_prec 1
+      call need_rparen
+      return
+    end
+    if k = 2 then do
+      pc = pc + 1
+      call ex_prec 15
+      if rt = 1 then call rt_error 13, "Type mismatch"
+      else rn = -rn
+      return
+    end
+    if k = 1 then do
+      pc = pc + 1
+      call ex_prec 15
+      if rt = 1 then call rt_error 13, "Type mismatch"
+      return
+    end
+    if k = 39 then do
+      pc = pc + 1
+      call ex_prec 7
+      if rt = 1 then call rt_error 13, "Type mismatch"
+      else do
+        a = toint(rn)
+        rn = (<not> a) as .float
+      end
+      return
+    end
+  end
+  call syn
+  rn = 0.0
+  rt = 0
+  return
+
+binop: procedure = .void
+  arg k = .int, ln = .float, ls = .string, lt = .int
+  a = .int
+  b = .int
+  tf = .int
+  x = .float
+  if k = 1 then do
+    if lt = 0 & rt = 0 then rn = ln + rn
+    else if lt = 1 & rt = 1 then rs = ls || rs
+    else call rt_error 13, "Type mismatch"
+    return
+  end
+  if k = 19 then do
+    if lt = 0 then ls = strip_num(ln)
+    if rt = 0 then rs = strip_num(rn)
+    rs = ls || rs
+    rt = 1
+    return
+  end
+  if k >= 12 & k <= 17 then do
+    tf = 0
+    if lt = 0 & rt = 0 then do
+      select
+        when k = 12 then if ln = rn then tf = 1
+        when k = 13 then if ln < rn then tf = 1
+        when k = 14 then if ln > rn then tf = 1
+        when k = 15 then if ln <= rn then tf = 1
+        when k = 16 then if ln >= rn then tf = 1
+        otherwise if ln \= rn then tf = 1
+      end
+    end
+    else if lt = 1 & rt = 1 then do
+      select
+        when k = 12 then if ls == rs then tf = 1
+        when k = 13 then if ls << rs then tf = 1
+        when k = 14 then if ls >> rs then tf = 1
+        when k = 15 then if ls <<= rs then tf = 1
+        when k = 16 then if ls >>= rs then tf = 1
+        otherwise if ls \== rs then tf = 1
+      end
+    end
+    else do
+      call rt_error 13, "Type mismatch"
+      return
+    end
+    if tf = 1 then rn = -1.0
+    else rn = 0.0
+    rt = 0
+    return
+  end
+  if lt = 1 | rt = 1 then do
+    call rt_error 13, "Type mismatch"
+    return
+  end
+  select
+    when k = 2 then rn = ln - rn
+    when k = 3 then rn = ln * rn
+    when k = 4 then do
+      if rn = 0 then do
+        call rt_error 11, "Division by zero"
+        rn = 0.0
+      end
+      else rn = ln / rn
+    end
+    when k = 5 then do
+      a = fixint(ln)
+      b = fixint(rn)
+      if b = 0 then do
+        call rt_error 11, "Division by zero"
+        rn = 0.0
+      end
+      else rn = (a % b) as .float
+    end
+    when k = 36 then do
+      a = fixint(ln)
+      b = fixint(rn)
+      if b = 0 then do
+        call rt_error 11, "Division by zero"
+        rn = 0.0
+      end
+      else rn = (a // b) as .float
+    end
+    when k = 6 then do
+      if ln = 0 & rn < 0 then do
+        call rt_error 11, "Division by zero"
+        rn = 0.0
+      end
+      else if ln < 0 & rxfloat..floor(rn) \= rn then do
+        call rt_error 5, "Illegal function call"
+        rn = 0.0
+      end
+      else rn = rxfloat..pow(ln, rn)
+    end
+    when k = 31 then do
+      a = toint(ln)
+      b = toint(rn)
+      rn = (a <and> b) as .float
+    end
+    when k = 32 then do
+      a = toint(ln)
+      b = toint(rn)
+      rn = (a <or> b) as .float
+    end
+    when k = 33 then do
+      a = toint(ln)
+      b = toint(rn)
+      rn = (a <xor> b) as .float
+    end
+    when k = 34 then do
+      a = toint(ln)
+      b = toint(rn)
+      rn = (<not> (a <xor> b)) as .float
+    end
+    when k = 35 then do
+      a = toint(ln)
+      b = toint(rn)
+      rn = ((<not> a) <or> b) as .float
+    end
+    when k = 37 then do
+      a = toint(ln)
+      b = toint(rn)
+      if b < 0 | b > 63 then rn = 0.0
+      else rn = (a <shl> b) as .float
+    end
+    when k = 38 then do
+      a = toint(ln)
+      b = toint(rn)
+      if b < 0 | b > 63 then do
+        if a < 0 then rn = -1.0
+        else rn = 0.0
+      end
+      else rn = (a <shr> b) as .float
+    end
+    otherwise call syn
+  end
+  rt = 0
+  return
+
+strip_num: procedure = .string
+  arg x = .float
+  return fmtnum(x)
+
+/* identifier: variable, array element, builtin or user function */
+ex_id: procedure = .void
+  slot = .int
+  idx = .int
+  r = .int
+  j = .int
+  base = .int
+  na = .int
+  slot = tk_k[pc]
+  if tk_f[pc] > 0 then do
+    if tk_y[pc] = 0 then tk_y[pc] = find_proc(tk_s[pc]) + 1
+    if tk_y[pc] = 1 then do
+      call do_builtin
+      return
+    end
+    j = tk_y[pc] - 1
+    pc = pc + 1
+    base = ab_cnt
+    na = 0
+    if tk_t[pc] = 5 & tk_k[pc] = 7 then na = eval_args(j)
+    if err_flag = 1 then do
+      ab_cnt = base
+      return
+    end
+    call invoke j, base, na
+    return
+  end
+  if tk_x[pc] = 0 then do
+    /* a user function with no argument list? */
+    j = tk_y[pc]
+    if j = 0 then do
+      if left(tk_s[pc], 2) == "FN" & length(tk_s[pc]) > 2 then j = 0 - find_fn(tk_s[pc])
+      if j = 0 then j = 100000000
+      tk_y[pc] = j
+    end
+    if j < 0 then do
+      call call_fn 0 - j
+      return
+    end
+    if v_kind[slot] = 2 then do
+      rs = v_s[slot]
+      rt = 1
+    end
+    else do
+      rn = v_n[slot]
+      rt = 0
+    end
+    pc = pc + 1
+    return
+  end
+  /* followed by '(' */
+  if v_isarr[slot] = 1 then do
+    pc = pc + 1
+    idx = arr_index(slot)
+    if err_flag = 1 then return
+    if v_kind[slot] = 2 then do
+      rs = pool_s[idx]
+      rt = 1
+    end
+    else do
+      rn = pool_n[idx]
+      rt = 0
+    end
+    return
+  end
+  r = tk_y[pc]
+  if r = 0 then do
+    r = find_proc(tk_s[pc])
+    if r = 0 then do
+      j = find_fn(tk_s[pc])
+      if j > 0 then r = -j
+    end
+    if r = 0 then r = 100000000
+    tk_y[pc] = r
+  end
+  if r > 0 & r < 100000000 then do
+    j = tk_k[pc]
+    pc = pc + 1
+    base = ab_cnt
+    na = eval_args(r)
+    if err_flag = 1 then do
+      ab_cnt = base
+      return
+    end
+    call invoke r, base, na
+    return
+  end
+  if r < 0 then do
+    call call_fn -r
+    return
+  end
+  /* implicit array */
+  pc = pc + 1
+  idx = arr_index(slot)
+  if err_flag = 1 then return
+  if v_kind[slot] = 2 then do
+    rs = pool_s[idx]
+    rt = 1
+  end
+  else do
+    rn = pool_n[idx]
+    rt = 0
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   Argument lists and procedure calls
+   --------------------------------------------------------------------- */
+/* pc is at '('; evaluate the arguments onto the argument stack; returns count */
+eval_args: procedure = .int
+  arg p = .int
+  n0 = .int
+  sv = .int
+  pc2 = .int
+  idx = .int
+  sl = .int
+  n0 = 0
+  if bare_flag = 0 then do
+    pc = pc + 1
+    if tk_t[pc] = 5 & tk_k[pc] = 8 then do
+      pc = pc + 1
+      return 0
+    end
+  end
+  do forever
+    if tk_t[pc] = 5 & tk_k[pc] = 18 then pc = pc + 1
+    sv = pc
+    if tk_t[sv] = 3 & tk_f[sv] = 0 & tk_x[sv] = 1 & tk_t[sv + 1] = 5 & tk_k[sv + 1] = 7 & tk_t[sv + 2] = 5 & tk_k[sv + 2] = 8 then do
+      /* whole array: name() */
+      ab_cnt = ab_cnt + 1
+      ab_n[ab_cnt] = 0.0
+      ab_s[ab_cnt] = ""
+      ab_t[ab_cnt] = 2
+      ab_slot[ab_cnt] = tk_k[sv]
+      ab_idx[ab_cnt] = 0
+      pc = sv + 3
+    end
+    else do
+      call ex_prec 1
+      if err_flag = 1 then return n0
+      ab_cnt = ab_cnt + 1
+      ab_n[ab_cnt] = rn
+      ab_s[ab_cnt] = rs
+      ab_t[ab_cnt] = rt
+      ab_slot[ab_cnt] = 0
+      ab_idx[ab_cnt] = 0
+      if p > 0 & n0 < p_pcnt[p] then do
+        if pp_ref[p_pfirst[p] + n0] = 1 & tk_t[sv] = 3 & tk_f[sv] = 0 then do
+          if tk_x[sv] = 0 & pc = sv + 1 then ab_slot[ab_cnt] = tk_k[sv]
+          else if tk_x[sv] = 1 & v_isarr[tk_k[sv]] = 1 then do
+            pc2 = pc
+            pc = sv + 1
+            idx = arr_index(tk_k[sv])
+            if pc = pc2 & err_flag = 0 then do
+              ab_slot[ab_cnt] = 0 - tk_k[sv]
+              ab_idx[ab_cnt] = idx
+            end
+            pc = pc2
+          end
+        end
+      end
+    end
+    n0 = n0 + 1
+    if tk_t[pc] = 5 & tk_k[pc] = 9 then pc = pc + 1
+    else leave
+  end
+  if bare_flag = 0 then call need_rparen
+  return n0
+
+/* call a SUB / FUNCTION: arguments are on the argument stack from base+1 */
+invoke: procedure = .void
+  arg p = .int, base = .int, na = .int
+  first = .int
+  cnt = .int
+  npar = .int
+  pf = .int
+  i = .int
+  d = .int
+  s = .int
+  a = .int
+  r = .int
+  src = .int
+  save_pc = .int
+  sv0 = .int
+  if cfp > 400 then do
+    call rt_error 7, "Out of memory (recursion too deep)"
+    ab_cnt = base
+    return
+  end
+  first = pl_first[p]
+  cnt = pl_cnt[p]
+  npar = p_pcnt[p]
+  pf = p_pfirst[p]
+  save_pc = pc
+  sv0 = svp
+  /* save and reset the locals */
+  do i = 0 to cnt - 1
+    s = pl_slots[first + i]
+    svp = svp + 1
+    sv_n[svp] = v_n[s]
+    sv_s[svp] = v_s[s]
+    sv_base[svp] = v_base[s]
+    sv_isarr[svp] = v_isarr[s]
+    sv_nd[svp] = v_nd[s]
+    do d = 1 to 3
+      sv_lo[(svp - 1) * 3 + d] = v_lo[(s - 1) * 3 + d]
+      sv_hi[(svp - 1) * 3 + d] = v_hi[(s - 1) * 3 + d]
+    end
+    v_n[s] = 0.0
+    v_s[s] = ""
+    v_isarr[s] = 0
+    v_nd[s] = 0
+    v_base[s] = 0
+  end
+  /* bind the parameters */
+  do i = 1 to npar
+    s = pp_slot[pf + i - 1]
+    if i <= na then do
+      a = base + i
+      if pp_arr[pf + i - 1] = 1 then do
+        if ab_t[a] = 2 then do
+          src = ab_slot[a]
+          v_base[s] = v_base[src]
+          v_isarr[s] = v_isarr[src]
+          v_nd[s] = v_nd[src]
+          do d = 1 to 3
+            v_lo[(s - 1) * 3 + d] = v_lo[(src - 1) * 3 + d]
+            v_hi[(s - 1) * 3 + d] = v_hi[(src - 1) * 3 + d]
+          end
+        end
+        else call rt_error 13, "Type mismatch"
+      end
+      else if v_kind[s] = 2 then do
+        if ab_t[a] = 1 then v_s[s] = ab_s[a]
+        else call rt_error 13, "Type mismatch"
+      end
+      else do
+        if ab_t[a] = 0 then do
+          if v_kind[s] = 1 then v_n[s] = toint(ab_n[a]) as .float
+          else v_n[s] = ab_n[a]
+        end
+        else call rt_error 13, "Type mismatch"
+      end
+    end
+  end
+  if err_flag = 0 then do
+    cfp = cfp + 1
+    cf_gsp[cfp] = gsp
+    cf_proc[cfp] = p
+    retflag = 0
+    pc = p_body[p]
+    call run_loop
+    cfp = cfp - 1
+    /* result of a FUNCTION */
+    if p_isfn[p] = 1 then do
+      r = p_ret[p]
+      if v_kind[r] = 2 then do
+        rs = v_s[r]
+        rt = 1
+      end
+      else do
+        rn = v_n[r]
+        rt = 0
+      end
+    end
+    else do
+      rn = 0.0
+      rt = 0
+    end
+    /* copy BYREF parameters back */
+    do i = 1 to npar
+      if i <= na then do
+        a = base + i
+        s = pp_slot[pf + i - 1]
+        if pp_ref[pf + i - 1] = 1 & pp_arr[pf + i - 1] = 0 then do
+          if ab_slot[a] > 0 then do
+            if v_kind[ab_slot[a]] = 2 then v_s[ab_slot[a]] = v_s[s]
+            else v_n[ab_slot[a]] = v_n[s]
+          end
+          else if ab_slot[a] < 0 & ab_idx[a] > 0 then do
+            if v_kind[0 - ab_slot[a]] = 2 then pool_s[ab_idx[a]] = v_s[s]
+            else pool_n[ab_idx[a]] = v_n[s]
+          end
+        end
+      end
+    end
+  end
+  /* restore the locals */
+  do i = cnt - 1 to 0 by -1
+    s = pl_slots[first + i]
+    v_n[s] = sv_n[svp]
+    v_s[s] = sv_s[svp]
+    v_base[s] = sv_base[svp]
+    v_isarr[s] = sv_isarr[svp]
+    v_nd[s] = sv_nd[svp]
+    do d = 1 to 3
+      v_lo[(s - 1) * 3 + d] = sv_lo[(svp - 1) * 3 + d]
+      v_hi[(s - 1) * 3 + d] = sv_hi[(svp - 1) * 3 + d]
+    end
+    svp = svp - 1
+  end
+  svp = sv0
+  ab_cnt = base
+  pc = save_pc
+  retflag = 0
+  return
+
+/* DEF FN user function: pc is at the FN name token */
+call_fn: procedure = .void
+  arg j = .int
+  q = .int
+  base = .int
+  na = .int
+  i = .int
+  np0 = .int
+  s = .int
+  e0 = .int
+  save_pc = .int
+  sv0 = .int
+  pcs = .int[]
+  q = fn_pc[j]
+  /* parameter slots */
+  np0 = 0
+  if tk_t[q] = 5 & tk_k[q] = 7 then do
+    q = q + 1
+    do while tk_t[q] \= 6 & tk_t[q] \= 7
+      if tk_t[q] = 5 & tk_k[q] = 8 then leave
+      if tk_t[q] = 3 then do
+        np0 = np0 + 1
+        pcs[np0] = tk_k[q]
+      end
+      q = q + 1
+    end
+    q = q + 1
+  end
+  /* q is at '=' */
+  e0 = q + 1
+  /* evaluate the call arguments */
+  pc = pc + 1
+  base = ab_cnt
+  na = 0
+  if tk_t[pc] = 5 & tk_k[pc] = 7 then na = eval_args(0)
+  if err_flag = 1 then do
+    ab_cnt = base
+    return
+  end
+  if na \= np0 then do
+    call rt_error 5, "Illegal function call"
+    ab_cnt = base
+    return
+  end
+  save_pc = pc
+  sv0 = svp
+  do i = 1 to np0
+    s = pcs[i]
+    svp = svp + 1
+    sv_n[svp] = v_n[s]
+    sv_s[svp] = v_s[s]
+    if v_kind[s] = 2 then do
+      if ab_t[base + i] = 1 then v_s[s] = ab_s[base + i]
+      else call rt_error 13, "Type mismatch"
+    end
+    else do
+      if ab_t[base + i] = 0 then v_n[s] = ab_n[base + i]
+      else call rt_error 13, "Type mismatch"
+    end
+  end
+  ab_cnt = base
+  pc = e0
+  call ex_prec 1
+  do i = np0 to 1 by -1
+    s = pcs[i]
+    v_n[s] = sv_n[svp]
+    v_s[s] = sv_s[svp]
+    svp = svp - 1
+  end
+  svp = sv0
+  pc = save_pc
+  return
+
+/* ---------------------------------------------------------------------
+   Output primitives
+   --------------------------------------------------------------------- */
+outs: procedure = .void
+  arg txt = .string
+  k = .int
+  fh = .int
+  if txt == "" then return
+  if out_file = 0 then do
+    assembler fwrite h_out, txt
+  end
+  else do
+    fh = fl_id[out_file]
+    assembler fwrite fh, txt
+  end
+  k = lastpos('0a'x, txt)
+  if k > 0 then out_col = length(txt) - k
+  else out_col = out_col + length(txt)
+  return
+
+flush_out: procedure = .void
+  rcx = .int
+  assembler fflush rcx, h_out
+  return
+
+errs: procedure = .void
+  arg txt = .string
+  rcx = .int
+  assembler fflush rcx, h_out
+  assembler fwrite h_err, txt
+  assembler fflush rcx, h_err
+  return
+
+/* ---------------------------------------------------------------------
+   Builtin functions
+   --------------------------------------------------------------------- */
+argok: procedure = .int
+  arg spec = .string, lo = .int, hi = .int, base = .int, na = .int
+  i = .int
+  c = .string
+  if na < lo | na > hi then do
+    call rt_error 5, "Illegal function call"
+    return 0
+  end
+  do i = 1 to na
+    c = substr(spec, i, 1)
+    if c == "n" & ab_t[base + i] \= 0 then do
+      call rt_error 13, "Type mismatch"
+      return 0
+    end
+    if c == "s" & ab_t[base + i] \= 1 then do
+      call rt_error 13, "Type mismatch"
+      return 0
+    end
+  end
+  return 1
+
+valparse: procedure = .float
+  arg s = .string
+  t = .string
+  sg = .string
+  c = .string
+  h = .string
+  body = .string
+  n = .int
+  p = .int
+  j = .int
+  k = .int
+  fd = .int
+  idg = .int
+  v = .float
+  t = strip(s)
+  n = length(t)
+  val_ok = 0
+  if n = 0 then return 0.0
+  if left(t, 1) == "&" & n >= 2 then do
+    h = upper(substr(t, 2, 1))
+    j = 3
+    if h == "H" then do
+      do while j <= n & verify(substr(t, j, 1), "0123456789ABCDEFabcdef") = 0
+        j = j + 1
+      end
+      if j = 3 then return 0.0
+      if j > n then val_ok = 1
+      return x2d(substr(t, 3, j - 3))
+    end
+    if h == "O" then do
+      do while j <= n & verify(substr(t, j, 1), "01234567") = 0
+        j = j + 1
+      end
+      if j = 3 then return 0.0
+      if j > n then val_ok = 1
+      return reradix(substr(t, 3, j - 3), 8, 10) as .float
+    end
+    if h == "B" then do
+      do while j <= n & verify(substr(t, j, 1), "01") = 0
+        j = j + 1
+      end
+      if j = 3 then return 0.0
+      if j > n then val_ok = 1
+      return b2d(substr(t, 3, j - 3))
+    end
+  end
+  p = 1
+  sg = ""
+  c = substr(t, 1, 1)
+  if c == "+" | c == "-" then do
+    sg = c
+    p = 2
+  end
+  j = p
+  do while j <= n & isdigit(substr(t, j, 1)) = 1
+    j = j + 1
+  end
+  idg = j - p
+  if j <= n & substr(t, j, 1) == "." then do
+    j = j + 1
+    k = j
+    do while j <= n & isdigit(substr(t, j, 1)) = 1
+      j = j + 1
+    end
+    idg = idg + (j - k)
+  end
+  if idg = 0 then return 0.0
+  if j <= n then do
+    c = upper(substr(t, j, 1))
+    if c == "E" | c == "D" then do
+      k = j + 1
+      if k <= n & (substr(t, k, 1) == "+" | substr(t, k, 1) == "-") then k = k + 1
+      if k <= n & isdigit(substr(t, k, 1)) = 1 then do
+        j = k
+        do while j <= n & isdigit(substr(t, j, 1)) = 1
+          j = j + 1
+        end
+      end
+    end
+  end
+  body = translate(upper(substr(t, p, j - p)), "E", "D")
+  if j > n then val_ok = 1
+  v = numtofloat(body)
+  if sg == "-" then v = -v
+  return v
+
+rnd_next: procedure = .float
+  rnd_state = (rnd_state * 48271) // 2147483647
+  if rnd_state = 0 then rnd_state = 1
+  rnd_last = rnd_state / 2147483647.0
+  return rnd_last
+
+hexstr: procedure = .string
+  arg n = .int
+  hi = .int
+  lo = .int
+  s = .string
+  if n >= 0 then return d2x(n)
+  hi = (n <shr> 32) <and> 4294967295
+  lo = n <and> 4294967295
+  s = right(d2x(hi), 8, "0") || right(d2x(lo), 8, "0")
+  return s
+
+radixstr: procedure = .string
+  arg n = .int, bits = .int, nd0 = .int
+  /* digits of n in base 2**bits, nd0 digits for the 64-bit two's complement form */
+  s = .string
+  m = .int
+  msk = .int
+  i = .int
+  s = ""
+  msk = (1 <shl> bits) - 1
+  if n >= 0 then do
+    m = n
+    if m = 0 then return "0"
+    do while m > 0
+      s = d2x(m <and> msk) || s
+      m = m <shr> bits
+    end
+    return s
+  end
+  m = n
+  do i = 1 to nd0
+    s = d2x(m <and> msk) || s
+    m = m <shr> bits
+  end
+  return s
+
+lookup_array: procedure = .int
+  arg nme = .string
+  v = .string
+  key = .string
+  key = nme || "("
+  if cfp > 0 then do
+    v = nm[p_name[cf_proc[cfp]] || ":" || key]
+    if v \== "" then return v as .int
+  end
+  v = nm[key]
+  if v \== "" then return v as .int
+  return 0
+
+do_builtin: procedure = .void
+  nme = .string
+  base = .int
+  na = .int
+  sl = .int
+  d0 = .int
+  nme = tk_s[pc]
+  pc = pc + 1
+  if nme == "LBOUND" | nme == "UBOUND" then do
+    /* UBOUND(array [, dimension]) */
+    call need_op 7
+    sl = 0
+    if tk_t[pc] = 3 then do
+      sl = lookup_array(tk_s[pc])
+      pc = pc + 1
+      if tk_t[pc] = 5 & tk_k[pc] = 7 then do
+        pc = pc + 1
+        call need_op 8
+      end
+    end
+    d0 = 1
+    if tk_t[pc] = 5 & tk_k[pc] = 9 then do
+      pc = pc + 1
+      call ex_prec 1
+      d0 = toint(rn)
+    end
+    call need_rparen
+    rt = 0
+    rn = 0.0
+    if sl = 0 | err_flag = 1 then do
+      call rt_error 5, "Illegal function call"
+      return
+    end
+    if v_isarr[sl] = 0 | d0 < 1 | d0 > v_nd[sl] then do
+      call rt_error 9, "Subscript out of range"
+      return
+    end
+    if nme == "LBOUND" then rn = v_lo[(sl - 1) * 3 + d0] as .float
+    else rn = v_hi[(sl - 1) * 3 + d0] as .float
+    return
+  end
+  base = ab_cnt
+  na = 0
+  if tk_t[pc] = 5 & tk_k[pc] = 7 then na = eval_args(0)
+  rn = 0.0
+  rs = ""
+  rt = 0
+  if err_flag = 1 then do
+    ab_cnt = base
+    return
+  end
+  call builtin nme, base, na
+  ab_cnt = base
+  return
+
+builtin: procedure = .void
+  arg nme = .string, base = .int, na = .int
+  x = .float
+  y = .float
+  s = .string
+  t = .string
+  n = .int
+  m = .int
+  p = .int
+  k = .int
+  i = .int
+  fh = .int
+  c = .string
+  if na >= 1 then do
+    if ab_t[base + 1] = 0 then x = ab_n[base + 1]
+    else s = ab_s[base + 1]
+  end
+  select
+    /* ---------- numeric ---------- */
+    when nme == "ABS" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..fabs(x)
+    end
+    when nme == "SGN" then do
+      if argok("n", 1, 1, base, na) then do
+        if x > 0 then rn = 1.0
+        else if x < 0 then rn = -1.0
+        else rn = 0.0
+      end
+    end
+    when nme == "INT" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..floor(x)
+    end
+    when nme == "FIX" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..trunc(x)
+    end
+    when nme == "FRAC" then do
+      if argok("n", 1, 1, base, na) then rn = x - rxfloat..trunc(x)
+    end
+    when nme == "CINT" | nme == "CLNG" then do
+      if argok("n", 1, 1, base, na) then rn = toint(x) as .float
+    end
+    when nme == "CSNG" | nme == "CDBL" then do
+      if argok("n", 1, 1, base, na) then rn = x
+    end
+    when nme == "CBOOL" then do
+      if argok("n", 1, 1, base, na) then do
+        if x \= 0 then rn = -1.0
+        else rn = 0.0
+      end
+    end
+    when nme == "SQR" | nme == "SQRT" then do
+      if argok("n", 1, 1, base, na) then do
+        if x < 0 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..sqrt(x)
+      end
+    end
+    when nme == "SIN" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..sin(x)
+    end
+    when nme == "COS" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..cos(x)
+    end
+    when nme == "TAN" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..tan(x)
+    end
+    when nme == "ATN" | nme == "ATAN" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..atan(x)
+    end
+    when nme == "ASIN" then do
+      if argok("n", 1, 1, base, na) then do
+        if x < -1 | x > 1 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..asin(x)
+      end
+    end
+    when nme == "ACOS" then do
+      if argok("n", 1, 1, base, na) then do
+        if x < -1 | x > 1 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..acos(x)
+      end
+    end
+    when nme == "ATAN2" then do
+      if argok("nn", 2, 2, base, na) then rn = rxfloat..atan2(x, ab_n[base + 2])
+    end
+    when nme == "SINH" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..sinh(x)
+    end
+    when nme == "COSH" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..cosh(x)
+    end
+    when nme == "TANH" then do
+      if argok("n", 1, 1, base, na) then rn = rxfloat..tanh(x)
+    end
+    when nme == "EXP" then do
+      if argok("n", 1, 1, base, na) then do
+        if x > 709 then call rt_error 6, "Overflow"
+        else rn = rxfloat..exp(x)
+      end
+    end
+    when nme == "LOG" then do
+      if argok("n", 1, 1, base, na) then do
+        if x <= 0 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..log(x)
+      end
+    end
+    when nme == "LOG10" then do
+      if argok("n", 1, 1, base, na) then do
+        if x <= 0 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..log10(x)
+      end
+    end
+    when nme == "LOG2" then do
+      if argok("n", 1, 1, base, na) then do
+        if x <= 0 then call rt_error 5, "Illegal function call"
+        else rn = rxfloat..log2(x)
+      end
+    end
+    when nme == "RND" then do
+      if na = 0 then rn = rnd_next()
+      else if argok("n", 1, 1, base, na) then do
+        if x < 0 then do
+          rnd_state = (toint(rxfloat..fabs(x) * 1000) // 2147483646) + 1
+          rn = rnd_next()
+        end
+        else if x = 0 then rn = rnd_last
+        else rn = rnd_next()
+      end
+    end
+    when nme == "TIMER" then do
+      rn = time("US") / 1000000.0
+    end
+    /* ---------- strings ---------- */
+    when nme == "LEN" then do
+      if argok("s", 1, 1, base, na) then rn = length(s) as .float
+    end
+    when nme == "LEFT" then do
+      if argok("sn", 2, 2, base, na) then do
+        n = toint(ab_n[base + 2])
+        if n < 0 then call rt_error 5, "Illegal function call"
+        else do
+          if n > length(s) then n = length(s)
+          rs = left(s, n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "RIGHT" then do
+      if argok("sn", 2, 2, base, na) then do
+        n = toint(ab_n[base + 2])
+        if n < 0 then call rt_error 5, "Illegal function call"
+        else do
+          if n > length(s) then n = length(s)
+          rs = right(s, n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "MID" then do
+      if argok("snn", 2, 3, base, na) then do
+        p = toint(ab_n[base + 2])
+        n = length(s) - p + 1
+        if na = 3 then do
+          m = toint(ab_n[base + 3])
+          if m < n then n = m
+        end
+        if p < 1 | n < 0 then call rt_error 5, "Illegal function call"
+        else do
+          if n = 0 | p > length(s) then rs = ""
+          else rs = substr(s, p, n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "STR" then do
+      if argok("n", 1, 1, base, na) then do
+        rs = fmtnum(x)
+        if x >= 0 & dial = 0 then rs = " " || rs
+        rt = 1
+      end
+    end
+    when nme == "VAL" | nme == "VALINT" | nme == "VALLNG" then do
+      if argok("s", 1, 1, base, na) then do
+        rn = valparse(s)
+        if nme \== "VAL" then rn = rxfloat..trunc(rn)
+      end
+    end
+    when nme == "CHR" then do
+      if argok("n", 1, 1, base, na) then do
+        n = toint(x)
+        if n < 0 | n > 1114111 then call rt_error 5, "Illegal function call"
+        else do
+          rs = d2c(n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "ASC" then do
+      if argok("s", 1, 1, base, na) then do
+        if s == "" then call rt_error 5, "Illegal function call"
+        else rn = c2d(left(s, 1)) as .float
+      end
+    end
+    when nme == "SPACE" then do
+      if argok("n", 1, 1, base, na) then do
+        n = toint(x)
+        if n < 0 then call rt_error 5, "Illegal function call"
+        else do
+          rs = copies(" ", n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "STRING" then do
+      if argok("n?", 2, 2, base, na) then do
+        n = toint(x)
+        if n < 0 then call rt_error 5, "Illegal function call"
+        else do
+          if ab_t[base + 2] = 0 then c = d2c(toint(ab_n[base + 2]))
+          else c = left(ab_s[base + 2], 1)
+          rs = copies(c, n)
+          rt = 1
+        end
+      end
+    end
+    when nme == "UCASE" then do
+      if argok("s", 1, 1, base, na) then do
+        rs = upper(s)
+        rt = 1
+      end
+    end
+    when nme == "LCASE" then do
+      if argok("s", 1, 1, base, na) then do
+        rs = lower(s)
+        rt = 1
+      end
+    end
+    when nme == "LTRIM" then do
+      if argok("s?", 1, 2, base, na) then do
+        rs = strip(s, "L")
+        rt = 1
+      end
+    end
+    when nme == "RTRIM" then do
+      if argok("s?", 1, 2, base, na) then do
+        rs = strip(s, "T")
+        rt = 1
+      end
+    end
+    when nme == "TRIM" then do
+      if argok("s?", 1, 2, base, na) then do
+        rs = strip(s, "B")
+        rt = 1
+      end
+    end
+    when nme == "INSTR" then do
+      if na = 2 & argok("ss", 2, 2, base, na) then do
+        if ab_s[base + 2] == "" then rn = 1.0
+        else rn = pos(ab_s[base + 2], s) as .float
+      end
+      else if na = 3 & argok("nss", 3, 3, base, na) then do
+        t = ab_s[base + 2]
+        s = ab_s[base + 3]
+        n = toint(x)
+        if n < 1 then call rt_error 5, "Illegal function call"
+        else if t == "" then do
+          if n <= length(s) + 1 then rn = n as .float
+          else rn = 0.0
+        end
+        else rn = pos(s, t, n) as .float
+      end
+      else if na < 2 | na > 3 then call rt_error 5, "Illegal function call"
+    end
+    when nme == "INSTRREV" then do
+      if argok("ss?", 2, 3, base, na) then do
+        t = ab_s[base + 2]
+        if t == "" then rn = (length(s) + 1) as .float
+        else if na = 3 then do
+          n = toint(ab_n[base + 3])
+          if n < 1 then rn = 0.0
+          else rn = lastpos(t, s, n) as .float
+        end
+        else rn = lastpos(t, s) as .float
+      end
+    end
+    when nme == "HEX" then do
+      if argok("n", 1, 2, base, na) then do
+        rs = hexstr(toint(x))
+        rt = 1
+      end
+    end
+    when nme == "OCT" then do
+      if argok("n", 1, 2, base, na) then do
+        rs = radixstr(toint(x), 3, 22)
+        rt = 1
+      end
+    end
+    when nme == "BIN" then do
+      if argok("n", 1, 2, base, na) then do
+        rs = x2b(radixstr(toint(x), 4, 16))
+        rs = strip(rs, "L", "0")
+        if rs == "" then rs = "0"
+        rt = 1
+      end
+    end
+    when nme == "SPC" then do
+      if argok("n", 1, 1, base, na) then do
+        n = toint(x)
+        if n < 0 then n = 0
+        rs = copies(" ", n)
+        rt = 1
+      end
+    end
+    when nme == "TAB" then do
+      if argok("n", 1, 1, base, na) then do
+        n = toint(x) - 1 - out_col
+        if n < 0 then n = 0
+        rs = copies(" ", n)
+        rt = 1
+      end
+    end
+    when nme == "POW" then do
+      if argok("nn", 2, 2, base, na) then rn = rxfloat..pow(x, ab_n[base + 2])
+    end
+    when nme == "MAX" then do
+      if argok("nn", 2, 2, base, na) then do
+        rn = x
+        if ab_n[base + 2] > x then rn = ab_n[base + 2]
+      end
+    end
+    when nme == "MIN" then do
+      if argok("nn", 2, 2, base, na) then do
+        rn = x
+        if ab_n[base + 2] < x then rn = ab_n[base + 2]
+      end
+    end
+    when nme == "ISNUMERIC" then do
+      if argok("s", 1, 1, base, na) then do
+        t = valparse(s)
+        if val_ok = 1 then rn = -1.0
+        else rn = 0.0
+      end
+    end
+    when nme == "IIF" then do
+      if argok("n??", 3, 3, base, na) then do
+        if x \= 0 then k = base + 2
+        else k = base + 3
+        rt = ab_t[k]
+        rn = ab_n[k]
+        rs = ab_s[k]
+      end
+    end
+    /* ---------- system ---------- */
+    when nme == "DATE" then do
+      t = date("S")
+      rs = substr(t, 5, 2) || "-" || substr(t, 7, 2) || "-" || left(t, 4)
+      rt = 1
+    end
+    when nme == "TIME" then do
+      rs = time("N")
+      rt = 1
+    end
+    when nme == "ERR" then rn = err_code as .float
+    when nme == "ERL" then rn = err_line as .float
+    when nme == "FRE" then rn = 1000000.0
+    when nme == "PEEK" then rn = 0.0
+    when nme == "CSRLIN" then rn = 1.0
+    when nme == "POS" then rn = (out_col + 1) as .float
+    when nme == "COMMAND" then do
+      if na = 0 then rs = cmdline
+      else do
+        n = toint(x)
+        if n < 1 then rs = prog_name
+        else rs = word(cmdline, n)
+      end
+      rt = 1
+    end
+    when nme == "ENVIRON" then do
+      if argok("s", 1, 1, base, na) then do
+        rs = getenv(s)
+        rt = 1
+      end
+    end
+    when nme == "CURDIR" then do
+      rs = "."
+      rt = 1
+    end
+    when nme == "FREEFILE" then do
+      rn = 0.0
+      do i = 1 to 255
+        if fl_mode[i] = 0 then do
+          rn = i as .float
+          leave
+        end
+      end
+    end
+    when nme == "EOF" then do
+      if argok("n", 1, 1, base, na) then rn = file_eof(toint(x)) as .float
+    end
+    when nme == "LOF" | nme == "LOC" | nme == "SEEK" then do
+      rn = 0.0
+    end
+    when nme == "INKEY" then do
+      call flush_out
+      fh = h_in
+      c = ""
+      assembler freadcdpt c, fh
+      rs = c
+      rt = 1
+    end
+    when nme == "INPUT" then do
+      if argok("n?", 1, 2, base, na) then do
+        n = toint(x)
+        fh = h_in
+        if na = 2 then do
+          k = toint(ab_n[base + 2])
+          if k < 1 | k > 255 | fl_mode[k] \= 1 then do
+            call rt_error 52, "Bad file number"
+            return
+          end
+          fh = fl_id[k]
+        end
+        else call flush_out
+        rs = ""
+        do i = 1 to n
+          c = ""
+          assembler freadcdpt c, fh
+          assembler feof k, fh
+          if k > 0 & length(c) = 0 then do
+            call rt_error 62, "Input past end of file"
+            leave
+          end
+          rs = rs || c
+        end
+        rt = 1
+      end
+    end
+    otherwise do
+      call rt_error 5, "Illegal function call (" || nme || ")"
+    end
+  end
+  return
+
+/* EOF(n): -1 when at end of file, else 0 (reads one line ahead) */
+file_eof: procedure = .int
+  arg n = .int
+  fh = .int
+  e = .int
+  line = .string
+  if n < 1 | n > 255 then do
+    call rt_error 52, "Bad file number"
+    return 0
+  end
+  if fl_mode[n] \= 1 then do
+    call rt_error 54, "Bad file mode"
+    return 0
+  end
+  if fl_has[n] = 1 then return 0
+  if fl_eof[n] = 1 then return -1
+  fh = fl_id[n]
+  line = ""
+  assembler freadline line, fh
+  assembler feof e, fh
+  if e > 0 & length(line) = 0 then do
+    fl_eof[n] = 1
+    return -1
+  end
+  if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+  fl_pend[n] = line
+  fl_has[n] = 1
+  return 0
+
+/* ---------------------------------------------------------------------
+   Statement helpers
+   --------------------------------------------------------------------- */
+at_end: procedure = .int
+  t = .int
+  t = tk_t[pc]
+  if t = 6 | t = 7 then return 1
+  if t = 5 & tk_k[pc] = 11 then return 1
+  if t = 4 & tk_s[pc] == "ELSE" then return 1
+  return 0
+
+num_expr: procedure = .float
+  call ex_prec 1
+  if rt = 1 then do
+    call rt_error 13, "Type mismatch"
+    return 0.0
+  end
+  return rn
+
+int_expr: procedure = .int
+  x = .float
+  x = num_expr()
+  if err_flag = 1 then return 0
+  return toint(x)
+
+str_expr: procedure = .string
+  call ex_prec 1
+  if rt \= 1 then do
+    call rt_error 13, "Type mismatch"
+    return ""
+  end
+  return rs
+
+is_op: procedure = .int
+  arg k = .int
+  if tk_t[pc] = 5 & tk_k[pc] = k then return 1
+  return 0
+
+is_kw: procedure = .int
+  arg w = .string
+  if tk_t[pc] = 4 & tk_s[pc] == w then return 1
+  return 0
+
+errmsg: procedure = .string
+  arg c = .int
+  select
+    when c = 1 then return "NEXT without FOR"
+    when c = 2 then return "Syntax error"
+    when c = 3 then return "RETURN without GOSUB"
+    when c = 4 then return "Out of DATA"
+    when c = 5 then return "Illegal function call"
+    when c = 6 then return "Overflow"
+    when c = 7 then return "Out of memory"
+    when c = 8 then return "Undefined line number"
+    when c = 9 then return "Subscript out of range"
+    when c = 10 then return "Duplicate definition"
+    when c = 11 then return "Division by zero"
+    when c = 13 then return "Type mismatch"
+    when c = 20 then return "RESUME without error"
+    when c = 52 then return "Bad file name or number"
+    when c = 53 then return "File not found"
+    when c = 54 then return "Bad file mode"
+    when c = 55 then return "File already open"
+    when c = 62 then return "Input past end of file"
+    when c = 64 then return "Bad file name"
+    when c = 70 then return "Permission denied"
+    otherwise nop
+  end
+  return "Unprintable error"
+
+/* store rn/rs/rt into a variable (idx > 0: array element in the pool) */
+store_val: procedure = .void
+  arg slot = .int, idx = .int
+  x = .float
+  if v_kind[slot] = 2 then do
+    if rt \= 1 then do
+      call rt_error 13, "Type mismatch"
+      return
+    end
+    if idx > 0 then pool_s[idx] = rs
+    else v_s[slot] = rs
+    return
+  end
+  if rt \= 0 then do
+    call rt_error 13, "Type mismatch"
+    return
+  end
+  x = rn
+  if v_kind[slot] = 1 then x = toint(x) as .float
+  if idx > 0 then pool_n[idx] = x
+  else v_n[slot] = x
+  return
+
+load_val: procedure = .void
+  arg slot = .int, idx = .int
+  if v_kind[slot] = 2 then do
+    if idx > 0 then rs = pool_s[idx]
+    else rs = v_s[slot]
+    rt = 1
+  end
+  else do
+    if idx > 0 then rn = pool_n[idx]
+    else rn = v_n[slot]
+    rt = 0
+  end
+  return
+
+/* parse a variable reference at pc: sets lv_slot / lv_idx */
+lval: procedure = .void
+  s = .int
+  lv_slot = 0
+  lv_idx = 0
+  if tk_t[pc] \= 3 | tk_f[pc] > 0 then do
+    call syn
+    return
+  end
+  s = tk_k[pc]
+  lv_slot = s
+  if tk_x[pc] = 1 then do
+    pc = pc + 1
+    lv_idx = arr_index(s)
+  end
+  else pc = pc + 1
+  return
+
+resolve_label: procedure = .int
+  arg tp = .int
+  key = .string
+  v = .string
+  if tk_y[tp] > 0 then return tk_y[tp]
+  if tk_t[tp] = 1 then key = toint(tk_n[tp]) as .string
+  else key = tk_s[tp]
+  v = lmap[key]
+  if v == "" then return 0
+  tk_y[tp] = ln_start[v as .int]
+  return tk_y[tp]
+
+/* ---------------------------------------------------------------------
+   Output
+   --------------------------------------------------------------------- */
+num_str: procedure = .string
+  arg x = .float
+  s = .string
+  s = fmtnum(x)
+  if x >= 0 then do
+    if dial = 0 then return " " || s || " "
+    return " " || s
+  end
+  if dial = 0 then return s || " "
+  return s
+
+set_outfile: procedure = .void
+  arg n = .int
+  if n < 1 | n > 255 then do
+    call rt_error 52, "Bad file name or number"
+    return
+  end
+  if fl_mode[n] \= 2 & fl_mode[n] \= 3 then do
+    call rt_error 54, "Bad file mode"
+    return
+  end
+  out_file = n
+  return
+
+/* optional '#n,' at pc; returns the file number (0 = none) */
+file_arg: procedure = .int
+  n = .int
+  n = 0
+  if is_op(18) = 1 then do
+    pc = pc + 1
+    n = int_expr()
+    if is_op(9) = 1 | is_op(10) = 1 then pc = pc + 1
+  end
+  return n
+
+do_print: procedure = .void
+  nl = .int
+  n = .int
+  k = .int
+  sp = .int
+  saved = .int
+  saved = out_file
+  pc = pc + 1
+  n = file_arg()
+  if err_flag = 1 then return
+  if n > 0 then call set_outfile n
+  if err_flag = 1 then do
+    out_file = saved
+    return
+  end
+  nl = 1
+  if is_kw("USING") = 1 then do
+    call print_using
+    out_file = saved
+    return
+  end
+  do while at_end() = 0 & err_flag = 0
+    k = tk_k[pc]
+    if tk_t[pc] = 5 & k = 10 then do
+      pc = pc + 1
+      nl = 0
+    end
+    else if tk_t[pc] = 5 & k = 9 then do
+      pc = pc + 1
+      sp = 14 - (out_col // 14)
+      call outs copies(" ", sp)
+      nl = 0
+    end
+    else do
+      call ex_prec 1
+      if err_flag = 1 then leave
+      if rt = 1 then call outs rs
+      else call outs num_str(rn)
+      nl = 1
+    end
+  end
+  if nl = 1 & err_flag = 0 then call outs '0a'x
+  out_file = saved
+  return
+
+/* ---------------------------------------------------------------------
+   PRINT USING
+   --------------------------------------------------------------------- */
+fixed_str: procedure = .string
+  arg x = .float, dec = .int
+  m = .float
+  v = .float
+  iv = .int
+  s = .string
+  m = rxfloat..pow(10.0, dec as .float)
+  v = rxfloat..floor(x * m + 0.5)
+  if v >= 9.0e18 then return fmtnum(x)
+  iv = v as .int
+  s = iv as .string
+  if dec > 0 then do
+    if length(s) <= dec then s = copies("0", dec - length(s) + 1) || s
+    s = left(s, length(s) - dec) || "." || right(s, dec)
+  end
+  return s
+
+group3: procedure = .string
+  arg ip = .string
+  r = .string
+  n = .int
+  r = ""
+  n = length(ip)
+  do while n > 3
+    r = "," || right(ip, 3) || r
+    ip = left(ip, n - 3)
+    n = n - 3
+  end
+  return ip || r
+
+/* format x according to a numeric field spec */
+using_num: procedure = .string
+  arg spec = .string, x = .float
+  i = .int
+  n = .int
+  nint = .int
+  ndec = .int
+  hasdot = .int
+  lead_plus = .int
+  dollar = .int
+  star = .int
+  comma = .int
+  expo = .int
+  neg = .int
+  width = .int
+  ex10 = .int
+  c = .string
+  trail = .string
+  body = .string
+  ip = .string
+  fp = .string
+  lead = .string
+  txt = .string
+  mant = .float
+  ax = .float
+  fill = .string
+  n = length(spec)
+  i = 1
+  nint = 0
+  ndec = 0
+  hasdot = 0
+  lead_plus = 0
+  dollar = 0
+  star = 0
+  comma = 0
+  expo = 0
+  trail = ""
+  if substr(spec, i, 1) == "+" then do
+    lead_plus = 1
+    i = i + 1
+  end
+  if substr(spec, i, 2) == "**" then do
+    star = 1
+    i = i + 2
+    if substr(spec, i, 1) == "$" then do
+      dollar = 1
+      i = i + 1
+    end
+  end
+  else if substr(spec, i, 2) == "$$" then do
+    dollar = 1
+    i = i + 2
+    nint = nint + 1
+  end
+  do while i <= n
+    c = substr(spec, i, 1)
+    if c == "#" then nint = nint + 1
+    else if c == "," then comma = 1
+    else leave
+    i = i + 1
+  end
+  if i <= n & substr(spec, i, 1) == "." then do
+    hasdot = 1
+    i = i + 1
+    do while i <= n & substr(spec, i, 1) == "#"
+      ndec = ndec + 1
+      i = i + 1
+    end
+  end
+  if substr(spec, i, 4) == "^^^^" then do
+    expo = 1
+    i = i + 4
+  end
+  if i <= n then do
+    c = substr(spec, i, 1)
+    if c == "+" | c == "-" then trail = c
+  end
+  neg = 0
+  if x < 0 then neg = 1
+  ax = rxfloat..fabs(x)
+  if expo = 1 then do
+    ex10 = 0
+    if ax \= 0 then ex10 = rxfloat..floor(rxfloat..log10(ax)) as .int
+    mant = ax / rxfloat..pow(10.0, ex10 as .float)
+    body = fixed_str(mant, ndec)
+    if left(body, 2) == "10" then do
+      ex10 = ex10 + 1
+      body = fixed_str(mant / 10, ndec)
+    end
+    ip = body
+    fp = ""
+    txt = body
+    if ex10 < 0 then txt = txt || "E-" || right(ex10 * -1 as .string, 2, "0")
+    else txt = txt || "E+" || right(ex10 as .string, 2, "0")
+  end
+  else do
+    body = fixed_str(ax, ndec)
+    p0 = pos(".", body)
+    if p0 > 0 then do
+      ip = left(body, p0 - 1)
+      fp = substr(body, p0)
+    end
+    else do
+      ip = body
+      fp = ""
+    end
+    if comma = 1 then ip = group3(ip)
+    if ip == "0" & nint = 0 then ip = ""
+    txt = ip || fp
+    if hasdot = 1 & ndec = 0 then txt = txt || "."
+  end
+  lead = ""
+  if lead_plus = 1 then do
+    if neg = 1 then lead = "-"
+    else lead = "+"
+  end
+  else if neg = 1 & trail == "" then lead = "-"
+  txt = lead || copies("$", dollar) || txt
+  if trail \== "" then do
+    if neg = 1 then txt = txt || "-"
+    else if trail == "+" then txt = txt || "+"
+    else txt = txt || " "
+  end
+  width = i - 1
+  if trail \== "" then width = i
+  if trail == "" then width = i - 1
+  width = length(spec)
+  if length(txt) > width then return "%" || txt
+  fill = " "
+  if star = 1 then fill = "*"
+  return right(txt, width, fill)
+
+print_using: procedure = .void
+  fmt = .string
+  out = .string
+  c = .string
+  c2 = .string
+  n = .int
+  i = .int
+  j = .int
+  k = .int
+  nfields = .int
+  fl = .int
+  field = .string
+  w = .int
+  nl = .int
+  more = .int
+  numstart = .int
+  spec = .string
+  done = .int
+  pc = pc + 1
+  fmt = str_expr()
+  if err_flag = 1 then return
+  if is_op(10) = 1 | is_op(9) = 1 then pc = pc + 1
+  n = length(fmt)
+  nl = 1
+  done = 0
+  nfields = 0
+  do while done = 0 & err_flag = 0
+    i = 1
+    nfields = 0
+    do while i <= n & done = 0 & err_flag = 0
+      c = substr(fmt, i, 1)
+      c2 = substr(fmt, i, 2)
+      fl = 0
+      if c == "_" then do
+        call outs substr(fmt, i + 1, 1)
+        i = i + 2
+        iterate
+      end
+      if c == "!" then fl = 1
+      else if c == "&" then fl = 2
+      else if c == "\" then do
+        j = pos("\", fmt, i + 1)
+        if j > 0 then fl = 3
+      end
+      else if c == "#" | (c == "." & substr(fmt, i + 1, 1) == "#") then fl = 4
+      else if (c == "+" | c == "-") & (substr(fmt, i + 1, 1) == "#" | substr(fmt, i + 1, 1) == "." | substr(fmt, i + 1, 2) == "$$" | substr(fmt, i + 1, 2) == "**") & c == "+" then fl = 4
+      else if c2 == "**" | c2 == "$$" then fl = 4
+      if fl = 0 then do
+        call outs c
+        i = i + 1
+        iterate
+      end
+      nfields = nfields + 1
+      if at_end() = 1 then do
+        done = 1
+        leave
+      end
+      call ex_prec 1
+      if err_flag = 1 then leave
+      if is_op(10) = 1 | is_op(9) = 1 then do
+        pc = pc + 1
+        if at_end() = 1 then nl = 0
+      end
+      if fl = 4 then do
+        if rt = 1 then do
+          call rt_error 13, "Type mismatch"
+          leave
+        end
+        /* extent of the numeric field */
+        k = i
+        if substr(fmt, k, 1) == "+" then k = k + 1
+        if substr(fmt, k, 2) == "**" then do
+          k = k + 2
+          if substr(fmt, k, 1) == "$" then k = k + 1
+        end
+        else if substr(fmt, k, 2) == "$$" then k = k + 2
+        do while k <= n & (substr(fmt, k, 1) == "#" | substr(fmt, k, 1) == ",")
+          k = k + 1
+        end
+        if k <= n & substr(fmt, k, 1) == "." then do
+          k = k + 1
+          do while k <= n & substr(fmt, k, 1) == "#"
+            k = k + 1
+          end
+        end
+        if substr(fmt, k, 4) == "^^^^" then k = k + 4
+        if k <= n & (substr(fmt, k, 1) == "+" | substr(fmt, k, 1) == "-") & substr(fmt, i, 1) \== substr(fmt, k, 1) then k = k + 1
+        else if k <= n & substr(fmt, k, 1) == "-" then k = k + 1
+        spec = substr(fmt, i, k - i)
+        call outs using_num(spec, rn)
+        i = k
+      end
+      else do
+        if rt \= 1 then do
+          call rt_error 13, "Type mismatch"
+          leave
+        end
+        if fl = 1 then do
+          call outs left(rs, 1)
+          i = i + 1
+        end
+        else if fl = 2 then do
+          call outs rs
+          i = i + 1
+        end
+        else do
+          w = j - i + 1
+          call outs left(rs, w, " ")
+          i = j + 1
+        end
+      end
+      if at_end() = 1 then done = 1
+    end
+    if nfields = 0 & err_flag = 0 then do
+      call rt_error 5, "Illegal function call"
+      leave
+    end
+    if at_end() = 1 then done = 1
+  end
+  if nl = 1 & err_flag = 0 then call outs '0a'x
+  return
+
+/* ---------------------------------------------------------------------
+   WRITE
+   --------------------------------------------------------------------- */
+do_write: procedure = .void
+  n = .int
+  saved = .int
+  first = .int
+  saved = out_file
+  pc = pc + 1
+  n = file_arg()
+  if n > 0 then call set_outfile n
+  first = 1
+  do while at_end() = 0 & err_flag = 0
+    call ex_prec 1
+    if err_flag = 1 then leave
+    if first = 0 then call outs ","
+    first = 0
+    if rt = 1 then call outs '"' || rs || '"'
+    else call outs fmtnum(rn)
+    if is_op(9) = 1 | is_op(10) = 1 then pc = pc + 1
+  end
+  if err_flag = 0 then call outs '0a'x
+  out_file = saved
+  return
+
+/* ---------------------------------------------------------------------
+   Input
+   --------------------------------------------------------------------- */
+read_text_line: procedure = .string
+  arg n = .int
+  fh = .int
+  e = .int
+  line = .string
+  if n = 0 then do
+    call flush_out
+    fh = h_in
+  end
+  else do
+    if n < 1 | n > 255 then do
+      call rt_error 52, "Bad file name or number"
+      return ""
+    end
+    if fl_mode[n] \= 1 then do
+      call rt_error 54, "Bad file mode"
+      return ""
+    end
+    if fl_has[n] = 1 then do
+      fl_has[n] = 0
+      return fl_pend[n]
+    end
+    if fl_eof[n] = 1 then do
+      call rt_error 62, "Input past end of file"
+      return ""
+    end
+    fh = fl_id[n]
+  end
+  line = ""
+  assembler freadline line, fh
+  assembler feof e, fh
+  if e > 0 & length(line) = 0 then do
+    if n > 0 then fl_eof[n] = 1
+    call rt_error 62, "Input past end of file"
+    return ""
+  end
+  if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+  return line
+
+split_fields: procedure = .void
+  arg line = .string
+  n = .int
+  i = .int
+  c = .string
+  w = .string
+  q = .int
+  inq = .int
+  n = length(line)
+  inp_n = 0
+  i = 1
+  w = ""
+  q = 0
+  inq = 0
+  do while i <= n
+    c = substr(line, i, 1)
+    if inq = 1 then do
+      if c == '"' then inq = 0
+      else w = w || c
+    end
+    else if c == '"' & strip(w) == "" then do
+      inq = 1
+      q = 1
+      w = ""
+    end
+    else if c == "," then do
+      inp_n = inp_n + 1
+      if q = 1 then inp_f[inp_n] = w
+      else inp_f[inp_n] = strip(w)
+      w = ""
+      q = 0
+    end
+    else w = w || c
+    i = i + 1
+  end
+  inp_n = inp_n + 1
+  if q = 1 then inp_f[inp_n] = w
+  else inp_f[inp_n] = strip(w)
+  return
+
+/* assign a text field to a variable; returns 0 when a number is malformed */
+assign_text: procedure = .int
+  arg slot = .int, idx = .int, txt = .string
+  if v_kind[slot] = 2 then do
+    rs = txt
+    rt = 1
+    call store_val slot, idx
+    return 1
+  end
+  rn = valparse(txt)
+  rt = 0
+  if val_ok = 0 & strip(txt) \== "" then return 0
+  call store_val slot, idx
+  return 1
+
+do_input: procedure = .void
+  n = .int
+  nv = .int
+  i = .int
+  j = .int
+  prompt = .string
+  line = .string
+  isl = .int
+  qm = .int
+  ok = .int
+  got = .int
+  sl = .int[]
+  ix = .int[]
+  isl = 0
+  pc = pc + 1
+  if tk_s[stmt_pc] == "LINEINPUT" then isl = 1
+  if is_op(10) = 1 then pc = pc + 1
+  n = file_arg()
+  prompt = ""
+  qm = 1
+  if n = 0 & tk_t[pc] = 2 then do
+    prompt = tk_s[pc]
+    pc = pc + 1
+    if is_op(10) = 1 then pc = pc + 1
+    else if is_op(9) = 1 then do
+      pc = pc + 1
+      qm = 0
+    end
+    else call syn
+  end
+  nv = 0
+  do forever
+    if err_flag = 1 then return
+    call lval
+    if err_flag = 1 then return
+    nv = nv + 1
+    sl[nv] = lv_slot
+    ix[nv] = lv_idx
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  if isl = 1 then do
+    if n = 0 then call outs prompt
+    line = read_text_line(n)
+    if err_flag = 1 then return
+    rs = line
+    rt = 1
+    call store_val sl[1], ix[1]
+    return
+  end
+  do forever
+    if n = 0 then do
+      call outs prompt
+      if qm = 1 then call outs "? "
+    end
+    got = 0
+    ok = 1
+    i = 1
+    do while i <= nv & ok = 1
+      line = read_text_line(n)
+      if err_flag = 1 then return
+      call split_fields line
+      j = 1
+      do while j <= inp_n & i <= nv
+        if assign_text(sl[i], ix[i], inp_f[j]) = 0 then do
+          ok = 0
+          leave
+        end
+        i = i + 1
+        j = j + 1
+      end
+      if ok = 1 & i <= nv & n = 0 then call outs "?? "
+    end
+    if ok = 1 then leave
+    if n \= 0 then do
+      call rt_error 13, "Type mismatch"
+      return
+    end
+    call outs "?Redo from start" || '0a'x
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   DATA / READ / RESTORE
+   --------------------------------------------------------------------- */
+do_read: procedure = .void
+  pc = pc + 1
+  do forever
+    call lval
+    if err_flag = 1 then return
+    if dptr > nd then do
+      call rt_error 4, "Out of DATA"
+      return
+    end
+    if assign_text(lv_slot, lv_idx, d_s[dptr]) = 0 then do
+      call rt_error 13, "Type mismatch"
+      return
+    end
+    dptr = dptr + 1
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return
+
+do_restore: procedure = .void
+  t = .int
+  li = .int
+  v = .string
+  pc = pc + 1
+  dptr = 1
+  if at_end() = 0 then do
+    if tk_t[pc] = 1 then v = lmap[toint(tk_n[pc]) as .string]
+    else v = lmap[tk_s[pc]]
+    pc = pc + 1
+    if v == "" then do
+      call rt_error 8, "Undefined line number"
+      return
+    end
+    li = v as .int
+    dptr = nd + 1
+    do t = 1 to nd
+      if d_line[t] >= li then do
+        dptr = t
+        leave
+      end
+    end
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   Files
+   --------------------------------------------------------------------- */
+do_open: procedure = .void
+  fnm = .string
+  mode = .string
+  md = .int
+  n = .int
+  fid = .int
+  rmode = .string
+  w = .string
+  pc = pc + 1
+  fnm = str_expr()
+  if err_flag = 1 then return
+  md = 0
+  if is_op(9) = 1 then do
+    /* OPEN "I", #1, "file" */
+    pc = pc + 1
+    mode = upper(left(fnm, 1))
+    if is_op(18) = 1 then pc = pc + 1
+    n = int_expr()
+    if is_op(9) = 1 then pc = pc + 1
+    fnm = str_expr()
+    if mode == "I" then md = 1
+    else if mode == "O" then md = 2
+    else if mode == "A" then md = 3
+  end
+  else do
+    md = 3
+    if is_kw("FOR") = 1 then do
+      pc = pc + 1
+      w = upper(tk_s[pc])
+      pc = pc + 1
+      if w == "INPUT" then md = 1
+      else if w == "OUTPUT" then md = 2
+      else if w == "APPEND" then md = 3
+      else md = -1
+    end
+    else md = 3
+    do while is_kw("AS") = 0 & at_end() = 0
+      pc = pc + 1
+    end
+    if is_kw("AS") = 1 then pc = pc + 1
+    if is_op(18) = 1 then pc = pc + 1
+    n = int_expr()
+    if is_kw("FOR") = 0 & md = 3 & w \== "APPEND" then md = 3
+    do while at_end() = 0
+      pc = pc + 1
+    end
+  end
+  if err_flag = 1 then return
+  if md <= 0 then do
+    call rt_error 54, "Bad file mode"
+    return
+  end
+  if n < 1 | n > 255 then do
+    call rt_error 52, "Bad file name or number"
+    return
+  end
+  if fl_mode[n] \= 0 then do
+    call rt_error 55, "File already open"
+    return
+  end
+  if md = 1 then rmode = "r"
+  else if md = 2 then rmode = "w"
+  else rmode = "a"
+  fid = 0
+  assembler fopen fid, fnm, rmode
+  if fid = 0 then do
+    if md = 1 then call rt_error 53, "File not found"
+    else call rt_error 70, "Permission denied"
+    return
+  end
+  fl_id[n] = fid
+  fl_mode[n] = md
+  fl_name[n] = fnm
+  fl_eof[n] = 0
+  fl_has[n] = 0
+  return
+
+close_file: procedure = .void
+  arg n = .int
+  fid = .int
+  rcx = .int
+  if n < 1 | n > 255 then return
+  if fl_mode[n] = 0 then return
+  fid = fl_id[n]
+  assembler fclose rcx, fid
+  fl_mode[n] = 0
+  fl_id[n] = 0
+  fl_has[n] = 0
+  fl_eof[n] = 0
+  return
+
+close_all: procedure = .void
+  i = .int
+  do i = 1 to 255
+    if fl_mode[i] \= 0 then call close_file i
+  end
+  return
+
+do_close: procedure = .void
+  n = .int
+  pc = pc + 1
+  if at_end() = 1 then do
+    call close_all
+    return
+  end
+  do forever
+    if is_op(18) = 1 then pc = pc + 1
+    n = int_expr()
+    if err_flag = 1 then return
+    call close_file n
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   The statement executor
+   --------------------------------------------------------------------- */
+cond_expr: procedure = .int
+  call ex_prec 1
+  if err_flag = 1 then return 0
+  if rt = 1 then do
+    call rt_error 13, "Type mismatch"
+    return 0
+  end
+  if rn \= 0 then return 1
+  return 0
+
+goto_tok: procedure = .void
+  arg tp = .int
+  t = .int
+  t = resolve_label(tp)
+  if t = 0 then call rt_error 8, "Undefined line number"
+  else pc = t
+  return
+
+report_error: procedure = .void
+  li = .int
+  s = .string
+  li = tk_l[stmt_pc]
+  call flush_out
+  if li >= 1 & ln_num[li] >= 0 then s = last_error_text || " in " || ln_num[li]
+  else s = last_error_text || " in line " || li
+  call errs s || '0a'x
+  return
+
+handle_error: procedure = .int
+  if cfp > 0 then return 0
+  if on_err \= 0 & redo_flag = 0 then do
+    res_pc = mstmt
+    err_flag = 0
+    if on_err < 0 then do
+      pc = stmt_end(mstmt)
+      return 1
+    end
+    redo_flag = 1
+    pc = on_err
+    return 1
+  end
+  call report_error
+  halted = 1
+  rc_exit = 1
+  return 0
+
+run_loop: procedure = .void
+  fsp0 = .int
+  ssp0 = .int
+  t = .int
+  fsp0 = fsp
+  ssp0 = ssp
+  do forever
+    if halted = 1 | retflag = 1 then leave
+    t = tk_t[pc]
+    if t = 6 then do
+      pc = pc + 1
+      iterate
+    end
+    if t = 5 & tk_k[pc] = 11 then do
+      pc = pc + 1
+      iterate
+    end
+    if t = 7 then do
+      halted = 1
+      leave
+    end
+    stmt_pc = pc
+    if cfp = 0 then mstmt = pc
+    if t = 4 then call exec_kw
+    else if t = 3 then call exec_assign
+    else call syn
+    if err_flag = 1 then do
+      if handle_error() = 0 then leave
+    end
+  end
+  fsp = fsp0
+  ssp = ssp0
+  return
+
+call_sub: procedure = .void
+  arg r = .int
+  base = .int
+  na = .int
+  base = ab_cnt
+  na = 0
+  if is_op(7) = 1 then na = eval_args(r)
+  else if at_end() = 0 then do
+    bare_flag = 1
+    na = eval_args(r)
+    bare_flag = 0
+  end
+  if err_flag = 1 then do
+    ab_cnt = base
+    return
+  end
+  call invoke r, base, na
+  return
+
+/* an assignment, or a SUB call written without CALL */
+exec_assign: procedure = .void
+  r = .int
+  k = .int
+  an = .float
+  as0 = .string
+  at = .int
+  s1 = .int
+  i1 = .int
+  if tk_f[pc] > 0 then do
+    r = find_proc(tk_s[pc])
+    if r > 0 then do
+      pc = pc + 1
+      call call_sub r
+      return
+    end
+    if tk_s[pc] == "MID" then do
+      call mid_assign
+      return
+    end
+    call syn
+    return
+  end
+  r = tk_y[pc]
+  if r = 0 then do
+    r = find_proc(tk_s[pc])
+    if r = 0 then r = 100000000
+    tk_y[pc] = r
+  end
+  if r > 0 & r < 100000000 & (tk_t[pc + 1] \= 5 | tk_k[pc + 1] \= 12) then do
+    pc = pc + 1
+    call call_sub r
+    return
+  end
+  if tk_x[pc] = 0 then do
+    s1 = tk_k[pc]
+    i1 = 0
+    pc = pc + 1
+  end
+  else do
+    call lval
+    if err_flag = 1 then return
+    s1 = lv_slot
+    i1 = lv_idx
+  end
+  if tk_t[pc] = 5 & tk_k[pc] = 12 then do
+    pc = pc + 1
+    call ex_prec 1
+    if err_flag = 1 then return
+    if i1 = 0 & rt = 0 & v_kind[s1] = 0 then v_n[s1] = rn
+    else call store_val s1, i1
+    return
+  end
+  /* compound assignment: += -= *= /= \= ^= &= */
+  if tk_t[pc] = 5 & tk_t[pc + 1] = 5 & tk_k[pc + 1] = 12 then do
+    k = tk_k[pc]
+    if k = 1 | k = 2 | k = 3 | k = 4 | k = 5 | k = 6 | k = 19 then do
+      pc = pc + 2
+      call load_val s1, i1
+      an = rn
+      as0 = rs
+      at = rt
+      call ex_prec 1
+      if err_flag = 1 then return
+      call binop k, an, as0, at
+      if err_flag = 1 then return
+      call store_val s1, i1
+      return
+    end
+  end
+  call syn
+  return
+
+mid_assign: procedure = .void
+  s1 = .int
+  i1 = .int
+  st = .int
+  ln = .int
+  txt = .string
+  cur = .string
+  pc = pc + 1
+  call need_op 7
+  call lval
+  if err_flag = 1 then return
+  s1 = lv_slot
+  i1 = lv_idx
+  call need_op 9
+  st = int_expr()
+  ln = 1000000
+  if is_op(9) = 1 then do
+    pc = pc + 1
+    ln = int_expr()
+  end
+  call need_rparen
+  call need_op 12
+  txt = str_expr()
+  if err_flag = 1 then return
+  call load_val s1, i1
+  cur = rs
+  if st < 1 | st > length(cur) then do
+    call rt_error 5, "Illegal function call"
+    return
+  end
+  if ln > length(txt) then ln = length(txt)
+  if ln > length(cur) - st + 1 then ln = length(cur) - st + 1
+  if ln > 0 then cur = left(cur, st - 1) || left(txt, ln) || substr(cur, st + ln)
+  rs = cur
+  rt = 1
+  call store_val s1, i1
+  return
+
+exec_kw: procedure = .void
+  k = .int
+  k = tk_k[pc]
+  select
+    when k = 3 then call do_if
+    when k = 8 then call do_for
+    when k = 11 then call do_next
+    when k = 1 then call do_print
+    when k = 17 then do
+      pc = pc + 1
+      call goto_tok pc
+    end
+    when k = 2 then do
+      pc = pc + 1
+      call exec_assign
+    end
+    when k = 18 then call do_gosub
+    when k = 19 then call do_return
+    when k = 12 then call do_while
+    when k = 13 then pc = tk_x[pc]
+    when k = 14 then call do_do
+    when k = 15 then call do_loop
+    when k = 5 | k = 6 then pc = tk_x[pc]
+    when k = 7 then pc = pc + 1
+    when k = 58 then call do_select
+    when k = 59 | k = 60 then pc = tk_x[pc]
+    when k = 61 then do
+      if ssp > 0 then ssp = ssp - 1
+      pc = pc + 1
+    end
+    when k = 25 | k = 26 | k = 74 | k = 76 then call do_dim
+    when k = 41 | k = 42 then call do_input
+    when k = 29 then call do_read
+    when k = 30 then call do_restore
+    when k = 28 then pc = pc + 1
+    when k = 32 then call do_swap
+    when k = 62 then call do_call
+    when k = 45 | k = 46 then call do_subdef
+    when k = 47 | k = 48 | k = 52 | k = 53 then retflag = 1
+    when k = 49 | k = 55 then call do_exitfor
+    when k = 50 then pc = tk_x[tk_x[pc]]
+    when k = 56 then pc = tk_y[tk_x[pc]]
+    when k = 51 then pc = tk_x[tk_x[pc]]
+    when k = 57 then pc = tk_x[pc]
+    when k = 54 then pc = tk_x[tk_x[pc]]
+    when k = 20 then call do_on
+    when k = 21 then call do_onerror
+    when k = 70 then call do_resume
+    when k = 71 then do
+      pc = pc + 1
+      k = int_expr()
+      if err_flag = 0 then call rt_error k, errmsg(k)
+    end
+    when k = 22 | k = 23 | k = 24 then halted = 1
+    when k = 44 then call do_const
+    when k = 31 then do
+      if tk_x[pc] > 0 then pc = tk_x[pc]
+      else pc = stmt_end(pc)
+    end
+    when k = 33 then call do_randomize
+    when k = 34 then call do_cls
+    when k = 35 then call do_locate
+    when k = 36 then call do_color
+    when k = 37 then do
+      call outs '07'x
+      pc = pc + 1
+    end
+    when k = 38 then call do_sleep
+    when k = 39 then call do_open
+    when k = 40 then call do_close
+    when k = 43 then call do_write
+    when k = 69 then call do_option
+    when k = 27 then call do_erase
+    when k = 88 then call do_clear
+    when k = 46 then call do_subdef
+    when k = 64 | k = 75 | k = 72 | k = 73 | k = 81 | k = 82 | k = 77 | k = 78 | k = 89 | k = 90 | k = 63 then pc = stmt_end(pc)
+    otherwise call syn
+  end
+  return
+
+do_subdef: procedure = .void
+  /* FUNCTION = value  (FreeBASIC result assignment) or a definition to skip */
+  r = .int
+  if tk_t[pc + 1] = 5 & tk_k[pc + 1] = 12 then do
+    if cfp = 0 then do
+      call syn
+      return
+    end
+    r = p_ret[cf_proc[cfp]]
+    pc = pc + 2
+    call ex_prec 1
+    if err_flag = 1 then return
+    call store_val r, 0
+    return
+  end
+  pc = tk_x[pc]
+  return
+
+do_call: procedure = .void
+  r = .int
+  pc = pc + 1
+  if tk_t[pc] \= 3 & tk_f[pc] = 0 then do
+    call syn
+    return
+  end
+  r = find_proc(tk_s[pc])
+  if r = 0 then do
+    call rt_error 2, "Syntax error: unknown SUB " || tk_s[pc]
+    return
+  end
+  pc = pc + 1
+  call call_sub r
+  return
+
+do_if: procedure = .void
+  p = .int
+  c = .int
+  t = .int
+  p = pc
+  pc = pc + 1
+  c = cond_expr()
+  if err_flag = 1 then return
+  if is_kw("THEN") = 1 then pc = pc + 1
+  else if is_kw("GOTO") = 0 then do
+    call syn
+    return
+  end
+  if tk_x[p] = 1 then do
+    if c = 0 then pc = tk_y[p]
+    if tk_t[pc] = 1 then call goto_tok pc
+    return
+  end
+  t = p
+  do forever
+    if c = 1 then leave
+    t = tk_y[t]
+    if tk_s[t] == "ELSEIF" then do
+      pc = t + 1
+      c = cond_expr()
+      if err_flag = 1 then return
+      if is_kw("THEN") = 1 then pc = pc + 1
+      iterate
+    end
+    if tk_s[t] == "ELSE" then pc = t + 1
+    else pc = t
+    leave
+  end
+  return
+
+do_gosub: procedure = .void
+  pc = pc + 1
+  if gsp > 20000 then do
+    call rt_error 7, "Out of memory"
+    return
+  end
+  gsp = gsp + 1
+  g_ret[gsp] = stmt_end(pc + 1)
+  call goto_tok pc
+  if err_flag = 1 then gsp = gsp - 1
+  return
+
+do_return: procedure = .void
+  r = .int
+  pc = pc + 1
+  if cfp > 0 then do
+    if gsp = cf_gsp[cfp] then do
+      r = cf_proc[cfp]
+      if p_isfn[r] = 1 & at_end() = 0 then do
+        call ex_prec 1
+        if err_flag = 1 then return
+        call store_val p_ret[r], 0
+      end
+      retflag = 1
+      return
+    end
+  end
+  if gsp > 0 then do
+    pc = g_ret[gsp]
+    gsp = gsp - 1
+  end
+  else call rt_error 3, "RETURN without GOSUB"
+  return
+
+do_while: procedure = .void
+  p = .int
+  p = pc
+  pc = pc + 1
+  if cond_expr() = 0 & err_flag = 0 then pc = tk_x[p]
+  return
+
+do_do: procedure = .void
+  p = .int
+  w = .string
+  c = .int
+  p = pc
+  pc = pc + 1
+  if is_kw("WHILE") = 1 | is_kw("UNTIL") = 1 then do
+    w = tk_s[pc]
+    pc = pc + 1
+    c = cond_expr()
+    if err_flag = 1 then return
+    if w == "WHILE" & c = 0 then pc = tk_x[p]
+    else if w == "UNTIL" & c = 1 then pc = tk_x[p]
+  end
+  return
+
+do_loop: procedure = .void
+  p = .int
+  w = .string
+  c = .int
+  p = pc
+  pc = pc + 1
+  if is_kw("WHILE") = 1 | is_kw("UNTIL") = 1 then do
+    w = tk_s[pc]
+    pc = pc + 1
+    c = cond_expr()
+    if err_flag = 1 then return
+    if w == "WHILE" & c = 1 then pc = tk_x[p]
+    else if w == "UNTIL" & c = 0 then pc = tk_x[p]
+  end
+  else pc = tk_x[p]
+  return
+
+do_for: procedure = .void
+  p = .int
+  slot = .int
+  j = .int
+  ok = .int
+  v = .float
+  e = .float
+  st = .float
+  p = pc
+  pc = pc + 1
+  call lval
+  if err_flag = 1 then return
+  slot = lv_slot
+  if lv_idx > 0 | v_kind[slot] = 2 then do
+    call rt_error 13, "Type mismatch"
+    return
+  end
+  call need_op 12
+  v = num_expr()
+  if is_kw("TO") = 1 then pc = pc + 1
+  else do
+    call syn
+    return
+  end
+  e = num_expr()
+  st = 1.0
+  if is_kw("STEP") = 1 then do
+    pc = pc + 1
+    st = num_expr()
+  end
+  if err_flag = 1 then return
+  if v_kind[slot] = 1 then v = toint(v) as .float
+  v_n[slot] = v
+  j = fsp
+  do while j >= 1
+    if f_slot[j] = slot then do
+      fsp = j - 1
+      leave
+    end
+    j = j - 1
+  end
+  ok = 1
+  if st >= 0 & v > e then ok = 0
+  if st < 0 & v < e then ok = 0
+  if ok = 0 then do
+    pc = tk_x[p]
+    return
+  end
+  fsp = fsp + 1
+  f_slot[fsp] = slot
+  f_end[fsp] = e
+  f_step[fsp] = st
+  f_pc[fsp] = pc
+  f_for[fsp] = p
+  return
+
+do_next: procedure = .void
+  slot = .int
+  j = .int
+  v = .float
+  c = .int
+  pc = pc + 1
+  do forever
+    slot = 0
+    if tk_t[pc] = 3 then do
+      slot = tk_k[pc]
+      pc = pc + 1
+    end
+    if fsp < 1 then do
+      call rt_error 1, "NEXT without FOR"
+      return
+    end
+    if slot > 0 then do
+      j = fsp
+      do while j >= 1
+        if f_slot[j] = slot then leave
+        j = j - 1
+      end
+      if j < 1 then do
+        call rt_error 1, "NEXT without FOR"
+        return
+      end
+      fsp = j
+    end
+    j = f_slot[fsp]
+    v = v_n[j] + f_step[fsp]
+    v_n[j] = v
+    c = 0
+    if f_step[fsp] >= 0 then do
+      if v <= f_end[fsp] then c = 1
+    end
+    else do
+      if v >= f_end[fsp] then c = 1
+    end
+    if c = 1 then do
+      pc = f_pc[fsp]
+      return
+    end
+    fsp = fsp - 1
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return
+
+/* EXIT FOR / CONTINUE FOR */
+do_exitfor: procedure = .void
+  f = .int
+  j = .int
+  isexit = .int
+  isexit = 0
+  if tk_s[pc] == "EXITFOR" then isexit = 1
+  f = tk_x[pc]
+  j = fsp
+  do while j >= 1
+    if f_for[j] = f then leave
+    j = j - 1
+  end
+  if isexit = 1 then do
+    if j >= 1 then fsp = j - 1
+    pc = tk_x[f]
+  end
+  else do
+    if j >= 1 then fsp = j
+    pc = tk_y[f]
+  end
+  return
+
+cmp3: procedure = .int
+  arg an = .float, as0 = .string, at = .int, bn = .float, bs = .string, bt = .int
+  if at \= bt then do
+    call rt_error 13, "Type mismatch"
+    return 0
+  end
+  if at = 0 then do
+    if an < bn then return -1
+    if an > bn then return 1
+    return 0
+  end
+  if as0 << bs then return -1
+  if as0 >> bs then return 1
+  return 0
+
+case_match: procedure = .int
+  m = .int
+  r = .int
+  k = .int
+  c = .int
+  sn = .float
+  ss = .string
+  st = .int
+  ln = .float
+  ls = .string
+  lt = .int
+  m = 0
+  sn = s_n[ssp]
+  ss = s_s[ssp]
+  st = s_t[ssp]
+  do forever
+    r = 0
+    if is_kw("IS") = 1 then do
+      pc = pc + 1
+      k = tk_k[pc]
+      if tk_t[pc] \= 5 | k < 12 | k > 17 then do
+        call syn
+        return 0
+      end
+      pc = pc + 1
+      call ex_prec 1
+      if err_flag = 1 then return 0
+      c = cmp3(sn, ss, st, rn, rs, rt)
+      if k = 12 & c = 0 then r = 1
+      else if k = 13 & c < 0 then r = 1
+      else if k = 14 & c > 0 then r = 1
+      else if k = 15 & c <= 0 then r = 1
+      else if k = 16 & c >= 0 then r = 1
+      else if k = 17 & c \= 0 then r = 1
+    end
+    else do
+      call ex_prec 1
+      if err_flag = 1 then return 0
+      if is_kw("TO") = 1 then do
+        pc = pc + 1
+        ln = rn
+        ls = rs
+        lt = rt
+        call ex_prec 1
+        if err_flag = 1 then return 0
+        if cmp3(sn, ss, st, ln, ls, lt) >= 0 & cmp3(sn, ss, st, rn, rs, rt) <= 0 then r = 1
+      end
+      else if cmp3(sn, ss, st, rn, rs, rt) = 0 then r = 1
+    end
+    if err_flag = 1 then return 0
+    if r = 1 then m = 1
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return m
+
+do_select: procedure = .void
+  c = .int
+  pc = pc + 1
+  call ex_prec 1
+  if err_flag = 1 then return
+  ssp = ssp + 1
+  s_n[ssp] = rn
+  s_s[ssp] = rs
+  s_t[ssp] = rt
+  c = tk_y[stmt_pc]
+  do forever
+    if tk_s[c] == "ENDSELECT" then do
+      pc = c
+      leave
+    end
+    if tk_s[c] == "CASEELSE" then do
+      pc = c + 1
+      leave
+    end
+    pc = c + 1
+    if case_match() = 1 then leave
+    if err_flag = 1 then leave
+    c = tk_y[c]
+  end
+  return
+
+do_swap: procedure = .void
+  s1 = .int
+  i1 = .int
+  s2 = .int
+  i2 = .int
+  an = .float
+  as0 = .string
+  at = .int
+  pc = pc + 1
+  call lval
+  s1 = lv_slot
+  i1 = lv_idx
+  call need_op 9
+  call lval
+  s2 = lv_slot
+  i2 = lv_idx
+  if err_flag = 1 then return
+  call load_val s1, i1
+  an = rn
+  as0 = rs
+  at = rt
+  call load_val s2, i2
+  call store_val s1, i1
+  if err_flag = 1 then return
+  rn = an
+  rs = as0
+  rt = at
+  call store_val s2, i2
+  return
+
+do_on: procedure = .void
+  n = .int
+  m = .int
+  r = .int
+  e = .int
+  t = .int
+  w = .string
+  tp = .int[]
+  pc = pc + 1
+  n = int_expr()
+  if err_flag = 1 then return
+  if is_kw("GOTO") = 1 | is_kw("GOSUB") = 1 then do
+    w = tk_s[pc]
+    pc = pc + 1
+  end
+  else do
+    call syn
+    return
+  end
+  m = 0
+  do forever
+    m = m + 1
+    tp[m] = pc
+    pc = pc + 1
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  if n < 1 | n > m then return
+  e = pc
+  if w == "GOSUB" then do
+    gsp = gsp + 1
+    g_ret[gsp] = e
+  end
+  call goto_tok tp[n]
+  if err_flag = 1 & w == "GOSUB" then gsp = gsp - 1
+  return
+
+do_onerror: procedure = .void
+  t = .int
+  pc = pc + 1
+  if is_kw("GOTO") = 1 then do
+    pc = pc + 1
+    if tk_t[pc] = 1 & tk_n[pc] = 0 then do
+      on_err = 0
+      pc = pc + 1
+    end
+    else do
+      t = resolve_label(pc)
+      if t = 0 then call rt_error 8, "Undefined line number"
+      else on_err = t
+      pc = pc + 1
+    end
+  end
+  else if is_kw("RESUME") = 1 then do
+    pc = pc + 1
+    if tk_t[pc] = 3 | tk_t[pc] = 4 then pc = pc + 1
+    on_err = -1
+  end
+  else call syn
+  return
+
+do_resume: procedure = .void
+  t = .int
+  pc = pc + 1
+  if redo_flag = 0 then do
+    call rt_error 20, "RESUME without error"
+    return
+  end
+  redo_flag = 0
+  if at_end() = 1 then pc = res_pc
+  else if tk_t[pc] = 4 & tk_s[pc] == "NEXT" then pc = stmt_end(res_pc)
+  else call goto_tok pc
+  return
+
+do_dim: procedure = .void
+  slot = .int
+  hasp = .int
+  nd0 = .int
+  b = .int
+  e = .int
+  lo = .int
+  hi = .int
+  preserve = .int
+  ob = .int
+  ocnt = .int
+  ncnt = .int
+  i = .int
+  skip = .int
+  isre = .int
+  l1 = .int
+  h1 = .int
+  l2 = .int
+  h2 = .int
+  l3 = .int
+  h3 = .int
+  isre = 0
+  if tk_s[pc] == "REDIM" then isre = 1
+  pc = pc + 1
+  preserve = 0
+  if is_kw("PRESERVE") = 1 then do
+    preserve = 1
+    pc = pc + 1
+  end
+  if is_kw("SHARED") = 1 then pc = pc + 1
+  if is_kw("AS") = 1 then do
+    pc = pc + 1
+    if tk_t[pc] = 8 then pc = pc + 1
+  end
+  do forever
+    if tk_t[pc] \= 3 then do
+      call syn
+      return
+    end
+    slot = tk_k[pc]
+    hasp = tk_x[pc]
+    pc = pc + 1
+    l1 = optbase
+    h1 = 0
+    l2 = optbase
+    h2 = 0
+    l3 = optbase
+    h3 = 0
+    skip = 0
+    if hasp = 1 then do
+      pc = pc + 1
+      nd0 = 0
+      do forever
+        e = int_expr()
+        if err_flag = 1 then return
+        if is_kw("TO") = 1 then do
+          pc = pc + 1
+          lo = e
+          hi = int_expr()
+        end
+        else do
+          lo = optbase
+          hi = e
+        end
+        nd0 = nd0 + 1
+        if nd0 = 1 then do
+          l1 = lo
+          h1 = hi
+        end
+        else if nd0 = 2 then do
+          l2 = lo
+          h2 = hi
+        end
+        else if nd0 = 3 then do
+          l3 = lo
+          h3 = hi
+        end
+        else do
+          call syn
+          return
+        end
+        if is_op(9) = 1 then pc = pc + 1
+        else leave
+      end
+      call need_rparen
+      if err_flag = 1 then return
+      if v_static[slot] = 1 & v_isarr[slot] = 1 then skip = 1
+      if skip = 0 then do
+        b = (slot - 1) * 3
+        ob = v_base[slot]
+        ocnt = 0
+        if v_isarr[slot] = 1 & v_nd[slot] = 1 then ocnt = v_hi[b + 1] - v_lo[b + 1] + 1
+        call dim_array slot, nd0, l1, h1, l2, h2, l3, h3
+        if err_flag = 1 then return
+        if preserve = 1 & nd0 = 1 & ocnt > 0 then do
+          ncnt = h1 - l1 + 1
+          if ocnt < ncnt then ncnt = ocnt
+          do i = 0 to ncnt - 1
+            if v_kind[slot] = 2 then pool_s[v_base[slot] + i] = pool_s[ob + i]
+            else pool_n[v_base[slot] + i] = pool_n[ob + i]
+          end
+        end
+      end
+    end
+    else if v_static[slot] = 0 then do
+      v_n[slot] = 0.0
+      v_s[slot] = ""
+    end
+    if is_kw("AS") = 1 then do
+      pc = pc + 1
+      if tk_t[pc] = 8 then pc = pc + 1
+    end
+    if is_op(12) = 1 & hasp = 0 then do
+      pc = pc + 1
+      call ex_prec 1
+      if err_flag = 1 then return
+      call store_val slot, 0
+    end
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return
+
+do_const: procedure = .void
+  slot = .int
+  pc = pc + 1
+  do forever
+    if tk_t[pc] \= 3 then do
+      call syn
+      return
+    end
+    slot = tk_k[pc]
+    pc = pc + 1
+    if is_kw("AS") = 1 then do
+      pc = pc + 1
+      if tk_t[pc] = 8 then pc = pc + 1
+    end
+    call need_op 12
+    call ex_prec 1
+    if err_flag = 1 then return
+    call store_val slot, 0
+    v_const[slot] = 1
+    if is_op(9) = 1 then pc = pc + 1
+    else leave
+  end
+  return
+
+do_erase: procedure = .void
+  pc = pc + 1
+  do while tk_t[pc] = 3
+    v_isarr[tk_k[pc]] = 0
+    pc = pc + 1
+    if is_op(7) = 1 then do
+      pc = pc + 1
+      call need_rparen
+    end
+    if is_op(9) = 1 then pc = pc + 1
+  end
+  return
+
+do_clear: procedure = .void
+  i = .int
+  do i = 1 to nvars
+    if v_const[i] = 0 then do
+      v_n[i] = 0.0
+      v_s[i] = ""
+      v_isarr[i] = 0
+    end
+  end
+  dptr = 1
+  pc = stmt_end(pc)
+  return
+
+do_option: procedure = .void
+  pc = pc + 1
+  if tk_t[pc] = 3 & tk_s[pc] == "BASE" then do
+    pc = pc + 1
+    optbase = int_expr()
+  end
+  else pc = stmt_end(pc)
+  return
+
+do_randomize: procedure = .void
+  x = .float
+  d = .float
+  i = .int
+  pc = pc + 1
+  if at_end() = 1 then x = time("US") as .float
+  else x = num_expr()
+  if err_flag = 1 then return
+  rnd_state = (toint(rxfloat..fmod(rxfloat..fabs(x), 2147483646.0)) // 2147483646) + 1
+  do i = 1 to 4
+    d = rnd_next()
+  end
+  return
+
+do_cls: procedure = .void
+  pc = pc + 1
+  if ansi = 1 then call outs '1b'x || "[2J" || '1b'x || "[H"
+  out_col = 0
+  return
+
+do_locate: procedure = .void
+  r = .int
+  c = .int
+  pc = pc + 1
+  r = -1
+  c = -1
+  if at_end() = 0 & is_op(9) = 0 then r = int_expr()
+  if is_op(9) = 1 then do
+    pc = pc + 1
+    if at_end() = 0 & is_op(9) = 0 then c = int_expr()
+  end
+  pc = stmt_end(pc)
+  if err_flag = 1 then return
+  if ansi = 1 then do
+    if r > 0 & c > 0 then call outs '1b'x || "[" || r || ";" || c || "H"
+    else if r > 0 then call outs '1b'x || "[" || r || ";1H"
+    else if c > 0 then call outs '1b'x || "[" || c || "G"
+  end
+  if c > 0 then out_col = c - 1
+  return
+
+ansi_color: procedure = .int
+  arg n = .int, bg = .int
+  base = .int
+  m = .int
+  m = n // 8
+  /* BASIC colour order is black blue green cyan red magenta yellow white */
+  if m = 1 then base = 4
+  else if m = 3 then base = 6
+  else if m = 4 then base = 1
+  else if m = 6 then base = 3
+  else if m = 2 then base = 2
+  else if m = 5 then base = 5
+  else if m = 0 then base = 0
+  else base = 7
+  if bg = 1 then do
+    if n >= 8 then return 100 + base
+    return 40 + base
+  end
+  if n >= 8 then return 90 + base
+  return 30 + base
+
+do_color: procedure = .void
+  f = .int
+  b = .int
+  pc = pc + 1
+  f = -1
+  b = -1
+  if at_end() = 0 & is_op(9) = 0 then f = int_expr()
+  if is_op(9) = 1 then do
+    pc = pc + 1
+    if at_end() = 0 & is_op(9) = 0 then b = int_expr()
+  end
+  pc = stmt_end(pc)
+  if err_flag = 1 then return
+  if ansi = 1 then do
+    if f >= 0 then call outs '1b'x || "[" || ansi_color(f, 0) || "m"
+    if b >= 0 then call outs '1b'x || "[" || ansi_color(b, 1) || "m"
+  end
+  return
+
+do_sleep: procedure = .void
+  x = .float
+  t0 = .float
+  c = .string
+  fh = .int
+  pc = pc + 1
+  call flush_out
+  if at_end() = 1 then do
+    fh = h_in
+    c = ""
+    assembler freadcdpt c, fh
+    return
+  end
+  x = num_expr()
+  if err_flag = 1 then return
+  t0 = time("US") / 1000000.0
+  do while time("US") / 1000000.0 - t0 < x
+    nop
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   Running a program
+   --------------------------------------------------------------------- */
+run_program: procedure = .void
+  halted = 0
+  err_flag = 0
+  pc = 1
+  gsp = 0
+  fsp = 0
+  ssp = 0
+  svp = 0
+  cfp = 0
+  ab_cnt = 0
+  dptr = 1
+  on_err = 0
+  redo_flag = 0
+  retflag = 0
+  out_file = 0
+  out_col = 0
+  running = 1
+  call run_loop
+  call close_all
+  call flush_out
+  running = 0
+  return
+
+dump_tokens: procedure = .void
+  t = .int
+  s = .string
+  p0 = .int
+  do p0 = 1 to ntk
+    t = tk_t[p0]
+    s = p0 || " L" || tk_l[p0] || " T" || t || " K" || tk_k[p0] || " F" || tk_f[p0] || " X" || tk_x[p0] || " Y" || tk_y[p0] || " "
+    if t = 1 then s = s || tk_n[p0]
+    else s = s || "[" || tk_s[p0] || "]"
+    say s
+  end
+  say "lines" nlines "tokens" ntk "vars" nvars "procs" np "data" nd
+  do p0 = 1 to nvars
+    say "var" p0 v_name[p0] "kind" v_kind[p0] "proc" v_proc[p0]
+  end
+  return
+
+/* ---------------------------------------------------------------------
+   Interactive mode
+   --------------------------------------------------------------------- */
+repl_store: procedure = .void
+  arg num = .int, txt = .string, rt0 = .string
+  i = .int
+  j = .int
+  i = 1
+  do while i <= rp_cnt
+    if rp_n[i] >= num then leave
+    i = i + 1
+  end
+  if i <= rp_cnt & rp_n[i] = num then do
+    if strip(rt0) == "" then do
+      do j = i to rp_cnt - 1
+        rp_n[j] = rp_n[j + 1]
+        rp_t[j] = rp_t[j + 1]
+      end
+      rp_cnt = rp_cnt - 1
+    end
+    else rp_t[i] = txt
+    return
+  end
+  if strip(rt0) == "" then return
+  do j = rp_cnt to i by -1
+    rp_n[j + 1] = rp_n[j]
+    rp_t[j + 1] = rp_t[j]
+  end
+  rp_n[i] = num
+  rp_t[i] = txt
+  rp_cnt = rp_cnt + 1
+  return
+
+repl_load: procedure = .void
+  arg fn = .string
+  fid = .int
+  eof = .int
+  rcx = .int
+  line = .string
+  rmode = "r"
+  fid = 0
+  assembler fopen fid, fn, rmode
+  if fid = 0 then do
+    say "File not found"
+    return
+  end
+  rp_cnt = 0
+  eof = 0
+  do while eof = 0
+    line = ""
+    assembler freadline line, fid
+    assembler feof eof, fid
+    if eof > 0 & length(line) = 0 then leave
+    rp_cnt = rp_cnt + 1
+    rp_n[rp_cnt] = rp_cnt * 10
+    if right(line, 1) == '0d'x then line = left(line, length(line) - 1)
+    rp_t[rp_cnt] = line
+  end
+  assembler fclose rcx, fid
+  return
+
+repl_run: procedure = .void
+  i = .int
+  ok = .int
+  call reset_program
+  do i = 1 to rp_cnt
+    call add_line rp_t[i]
+  end
+  ok = link_program()
+  if ok = 1 then do
+    call run_program
+    pc = 1
+  end
+  return
+
+repl: procedure = .void
+  line = .string
+  u = .string
+  w = .string
+  num = .int
+  i = .int
+  j = .int
+  ok = .int
+  fl = .int
+  rp_cnt = 0
+  in_repl = 1
+  call reset_program
+  call outs "CREXX BASIC.  Commands: RUN LIST NEW LOAD ""file"" SYSTEM" || '0a'x
+  do forever
+    call outs "Ok" || '0a'x
+    err_flag = 0
+    line = read_text_line(0)
+    if err_flag = 1 then leave
+    line = strip(line)
+    if line == "" then iterate
+    u = upper(line)
+    if isdigit(left(line, 1)) = 1 then do
+      j = 1
+      do while j <= length(line) & isdigit(substr(line, j, 1)) = 1
+        j = j + 1
+      end
+      num = left(line, j - 1) as .int
+      call repl_store num, line, substr(line, j)
+      iterate
+    end
+    if u == "SYSTEM" | u == "QUIT" | u == "EXIT" then leave
+    if u == "NEW" then do
+      rp_cnt = 0
+      call reset_program
+      iterate
+    end
+    if u == "RUN" then do
+      call repl_run
+      iterate
+    end
+    if u == "LIST" then do
+      do i = 1 to rp_cnt
+        call outs rp_t[i] || '0a'x
+      end
+      iterate
+    end
+    if left(u, 5) == "LOAD " then do
+      call repl_load strip(substr(line, 6), "B", '"')
+      iterate
+    end
+    /* immediate statement */
+    if ntk > 0 & tk_t[ntk] = 7 then nop
+    call add_line line
+    ok = link_program()
+    if ok = 1 then do
+      halted = 0
+      err_flag = 0
+      retflag = 0
+      pc = ln_start[nlines]
+      call run_loop
+      call flush_out
+    end
+  end
+  call close_all
+  call flush_out
+  return

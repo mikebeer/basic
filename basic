@@ -1,0 +1,17 @@
+#!/bin/sh
+# Launcher for the CREXX BASIC interpreter.
+#   ./basic [options] program.bas [program args]
+#   ./basic                       (interactive prompt)
+# The interpreter is compiled to bytecode on first use (about half a minute),
+# afterwards it starts in under a second.  Set CREXX to the crexx driver if it
+# is not on your PATH.
+DIR=$(cd "$(dirname "$0")" && pwd)
+CREXX=${CREXX:-crexx}
+if [ ! -f "$DIR/basic.rxbin" ] || [ "$DIR/basic.crexx" -nt "$DIR/basic.rxbin" ]; then
+  echo "basic: compiling interpreter (first run only)..." >&2
+  "$CREXX" "$DIR/basic.crexx" -noexec >/dev/null 2>&1 || {
+    echo "basic: compilation failed - run: $CREXX $DIR/basic.crexx -noexec" >&2
+    exit 2
+  }
+fi
+exec "$CREXX" "$DIR/basic.crexx" -nocompile -args "$@"
