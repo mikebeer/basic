@@ -16,6 +16,16 @@ The full manual, in the style of a classic IBM publication, is in
 [`docs/BASIC-CREXX-Guide.docx`](docs/BASIC-CREXX-Guide.docx) (PDF copy:
 [`docs/BASIC-CREXX-Guide.pdf`](docs/BASIC-CREXX-Guide.pdf)).
 
+## CRE version
+
+This branch (`cre-port`) runs on the CREXX Language Environment
+([mikebeer/language_environment](https://github.com/mikebeer/language_environment)),
+included as the git submodule `cre`. Character classes (`cretext`), float literal
+parsing and float text (`crenum`) and the standard output and error streams
+(`creio`) come from CRE instead of private copies. Clone with
+`git clone --recurse-submodules`, or run `git submodule update --init`.
+The regression tests give the same results as before.
+
 ## Running
 
 You need the `crexx` driver (`rxc`, `rxas`, `rxvm`) on your `PATH`, or point

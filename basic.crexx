@@ -18,6 +18,9 @@ options levelb numeric_classic
 import rxfnsb
 import rxfloat
 import _rxsysb
+import cretext
+import crenum
+import creio
 namespace basic expose tk_t tk_n tk_s tk_k tk_f tk_x tk_y tk_l ntk,
    ln_text ln_num ln_start nlines lmap nm nvars v_name v_kind v_n v_s v_isarr,
    v_nd v_base v_lo v_hi v_proc v_const v_shared v_static pool_n pool_s npn nps,
@@ -30,7 +33,7 @@ namespace basic expose tk_t tk_n tk_s tk_k tk_f tk_x tk_y tk_l ntk,
    fl_name fl_eof dial rnd_state rnd_last optbase dbg defkind kws fns prec,
    cmdline prog_name pw_end val_ok wstack_n tk_dummy src_dir wd_width,
    cur_row cur_col running last_error_text redo_flag in_repl kb_buf,
-   sort_dummy link_errs h_out h_in h_err fl_pend fl_has bare_flag ea_stop nopar lv_slot lv_idx inp_f inp_n res_pc f_for ansi mstmt rc_exit rp_n rp_t rp_cnt
+   sort_dummy link_errs h_in fl_pend fl_has bare_flag ea_stop nopar lv_slot lv_idx inp_f inp_n res_pc f_for ansi mstmt rc_exit rp_n rp_t rp_cnt
 
 arg av = .string[]
 call init
@@ -249,9 +252,7 @@ init: procedure = .void
   src_dir = ""
   sort_dummy = 0
   link_errs = 0
-  h_out = _open("stdout", "w")
   h_in = _open("stdin", "r")
-  h_err = _open("stderr", "w")
   /* keyword list: statement words (operator words are listed separately) */
   kws = " PRINT LET IF THEN ELSE ELSEIF ENDIF FOR TO STEP NEXT WHILE WEND DO LOOP UNTIL GOTO GOSUB RETURN ON ONERROR END STOP SYSTEM DIM REDIM ERASE DATA READ RESTORE DEF SWAP RANDOMIZE CLS LOCATE COLOR BEEP SLEEP OPEN CLOSE INPUT LINEINPUT WRITE CONST SUB FUNCTION ENDSUB ENDFUNCTION EXITFOR EXITDO EXITWHILE EXITSUB EXITFUNCTION EXITSELECT CONTFOR CONTDO CONTWHILE SELECTCASE CASE CASEELSE ENDSELECT CALL DECLARE SHARED AS BYVAL BYREF USING OPTION RESUME ERROR WIDTH SCREEN STATIC COMMON LOCAL SHELL KILL IS PRESERVE VIEW PALETTE DEFINT DEFSNG DEFDBL DEFSTR DEFLNG CLEAR LSET RSET "
   fns = " ABS ASC ATN CDBL CHR CINT CLNG COS CSNG EXP FIX HEX INT LEFT LEN LOG LTRIM MID OCT RIGHT RND RTRIM SGN SIN SPACE SQR STR STRING TAN UCASE LCASE VAL INSTR TIMER DATE TIME INKEY INPUT EOF LOF FREEFILE ERR ERL FRE POS CSRLIN LBOUND UBOUND ASIN ACOS ATAN2 SINH COSH TANH LOG10 LOG2 TRIM INSTRREV IIF VALINT VALLNG COMMAND ENVIRON CURDIR FRAC CBOOL PEEK TAB SPC FORMAT BIN SQRT CINT ENVIRON MKI CVI LOC SEEK ATAN POW MAX MIN ISNUMERIC "
@@ -338,24 +339,16 @@ add_line: procedure = .void
 /* ---------------------------------------------------------------------
    Character classes
    --------------------------------------------------------------------- */
-isdigit: procedure = .int
-  arg c = .string
-  if c == "" then return 0
-  if c >>= "0" & c <<= "9" then return 1
-  return 0
-
 isletter: procedure = .int
   arg c = .string
   if c == "" then return 0
   if c == "_" then return 1
-  u = upper(c)
-  if u >>= "A" & u <<= "Z" then return 1
-  return 0
+  return cretext..isalpha(c)
 
-isalnum: procedure = .int
+isidch: procedure = .int
   arg c = .string
   if isletter(c) = 1 then return 1
-  if isdigit(c) = 1 then return 1
+  if cretext..isdigit(c) = 1 then return 1
   if c == "." then return 1
   return 0
 
@@ -565,17 +558,6 @@ emit: procedure = .void
   tk_l[ntk] = li
   return
 
-numtofloat: procedure = .float
-  arg w = .string
-  t = w
-  if left(t, 1) == "." then t = "0" || t
-  p = pos(".", t)
-  if p > 0 then do
-    if p = length(t) then t = t || "0"
-    else if substr(t, p + 1, 1) == "e" | substr(t, p + 1, 1) == "E" then t = left(t, p) || "0" || substr(t, p + 1)
-  end
-  return t as .float
-
 /* ---------------------------------------------------------------------
    The tokenizer: one source line -> tokens
    token types: 1 NUM 2 STR 3 ID 4 KW 5 OP 6 EOL 7 END 8 TYP
@@ -624,7 +606,7 @@ tokenize_line: procedure = .void
     i = i + 1
   end
   j = i
-  do while j <= n & isdigit(substr(txt, j, 1)) = 1
+  do while j <= n & cretext..isdigit(substr(txt, j, 1)) = 1
     j = j + 1
   end
   if j > i then do
@@ -648,14 +630,14 @@ tokenize_line: procedure = .void
     if c == "'" then leave
     c2 = substr(txt, i, 2)
     /* ---------- numbers ---------- */
-    if isdigit(c) = 1 | (c == "." & isdigit(substr(txt, i + 1, 1)) = 1) then do
+    if cretext..isdigit(c) = 1 | (c == "." & cretext..isdigit(substr(txt, i + 1, 1)) = 1) then do
       j = i
-      do while j <= n & isdigit(substr(txt, j, 1)) = 1
+      do while j <= n & cretext..isdigit(substr(txt, j, 1)) = 1
         j = j + 1
       end
       if j <= n & substr(txt, j, 1) == "." then do
         j = j + 1
-        do while j <= n & isdigit(substr(txt, j, 1)) = 1
+        do while j <= n & cretext..isdigit(substr(txt, j, 1)) = 1
           j = j + 1
         end
       end
@@ -664,21 +646,21 @@ tokenize_line: procedure = .void
         if e == "E" | e == "D" then do
           k = j + 1
           if k <= n & (substr(txt, k, 1) == "+" | substr(txt, k, 1) == "-") then k = k + 1
-          if k <= n & isdigit(substr(txt, k, 1)) = 1 then do
+          if k <= n & cretext..isdigit(substr(txt, k, 1)) = 1 then do
             j = k
-            do while j <= n & isdigit(substr(txt, j, 1)) = 1
+            do while j <= n & cretext..isdigit(substr(txt, j, 1)) = 1
               j = j + 1
             end
           end
         end
       end
       w = translate(upper(substr(txt, i, j - i)), "E", "D")
-      nv = numtofloat(w)
+      nv = crenum..parsefloat(w)
       i = j
       /* optional type suffix on literals */
       sx = substr(txt, i, 1)
       if sx == "%" | sx == "!" | sx == "#" then i = i + 1
-      else if sx == "&" & isalnum(substr(txt, i + 1, 1)) = 0 then i = i + 1
+      else if sx == "&" & isidch(substr(txt, i + 1, 1)) = 0 then i = i + 1
       call emit 1, nv, "", 0, 0, li
       atstart = 0
       iterate
@@ -688,7 +670,7 @@ tokenize_line: procedure = .void
       sx = upper(substr(txt, i + 1, 1))
       if sx == "H" | sx == "O" | sx == "B" then do
         j = i + 2
-        do while j <= n & isalnum(substr(txt, j, 1)) = 1
+        do while j <= n & isidch(substr(txt, j, 1)) = 1
           j = j + 1
         end
         w = upper(substr(txt, i + 2, j - i - 2))
@@ -730,7 +712,7 @@ tokenize_line: procedure = .void
     /* ---------- identifiers and keywords ---------- */
     if isletter(c) = 1 then do
       j = i
-      do while j <= n & isalnum(substr(txt, j, 1)) = 1
+      do while j <= n & isidch(substr(txt, j, 1)) = 1
         j = j + 1
       end
       w = substr(txt, i, j - i)
@@ -741,7 +723,7 @@ tokenize_line: procedure = .void
       end
       else if sx == "&" & substr(txt, j + 1, 1) \== "&" then do
         /* long suffix, but not the string-concatenation operator */
-        if isalnum(peekchar(txt, j + 1)) = 0 & peekchar(txt, j + 1) \== '"' & peekchar(txt, j + 1) \== "(" then do
+        if isidch(peekchar(txt, j + 1)) = 0 & peekchar(txt, j + 1) \== '"' & peekchar(txt, j + 1) \== "(" then do
           w = w || sx
           j = j + 1
         end
@@ -800,7 +782,7 @@ tokenize_line: procedure = .void
                 j = j + 1
               end
               j = j + 1
-              do while j <= n & (substr(txt, j, 1) == " " | isdigit(substr(txt, j, 1)) = 1)
+              do while j <= n & (substr(txt, j, 1) == " " | cretext..isdigit(substr(txt, j, 1)) = 1)
                 j = j + 1
               end
               i = j
@@ -1402,8 +1384,7 @@ fmtnum: procedure = .string
     iv = x as .int
     return iv as .string
   end
-  s = x as .string
-  return translate(s, "E", "e")
+  return crenum..realtext(x)
 
 /* ---------------------------------------------------------------------
    Arrays
@@ -2163,7 +2144,7 @@ outs: procedure = .void
   fh = .int
   if txt == "" then return
   if out_file = 0 then do
-    assembler fwrite h_out, txt
+    call creio..out txt
   end
   else do
     fh = fl_id[out_file]
@@ -2172,19 +2153,6 @@ outs: procedure = .void
   k = lastpos('0a'x, txt)
   if k > 0 then out_col = length(txt) - k
   else out_col = out_col + length(txt)
-  return
-
-flush_out: procedure = .void
-  rcx = .int
-  assembler fflush rcx, h_out
-  return
-
-errs: procedure = .void
-  arg txt = .string
-  rcx = .int
-  assembler fflush rcx, h_out
-  assembler fwrite h_err, txt
-  assembler fflush rcx, h_err
   return
 
 /* ---------------------------------------------------------------------
@@ -2265,14 +2233,14 @@ valparse: procedure = .float
     p = 2
   end
   j = p
-  do while j <= n & isdigit(substr(t, j, 1)) = 1
+  do while j <= n & cretext..isdigit(substr(t, j, 1)) = 1
     j = j + 1
   end
   idg = j - p
   if j <= n & substr(t, j, 1) == "." then do
     j = j + 1
     k = j
-    do while j <= n & isdigit(substr(t, j, 1)) = 1
+    do while j <= n & cretext..isdigit(substr(t, j, 1)) = 1
       j = j + 1
     end
     idg = idg + (j - k)
@@ -2283,9 +2251,9 @@ valparse: procedure = .float
     if c == "E" | c == "D" then do
       k = j + 1
       if k <= n & (substr(t, k, 1) == "+" | substr(t, k, 1) == "-") then k = k + 1
-      if k <= n & isdigit(substr(t, k, 1)) = 1 then do
+      if k <= n & cretext..isdigit(substr(t, k, 1)) = 1 then do
         j = k
-        do while j <= n & isdigit(substr(t, j, 1)) = 1
+        do while j <= n & cretext..isdigit(substr(t, j, 1)) = 1
           j = j + 1
         end
       end
@@ -2293,7 +2261,7 @@ valparse: procedure = .float
   end
   body = translate(upper(substr(t, p, j - p)), "E", "D")
   if j > n then val_ok = 1
-  v = numtofloat(body)
+  v = crenum..parsefloat(body)
   if sg == "-" then v = -v
   return v
 
@@ -2808,7 +2776,7 @@ builtin: procedure = .void
       rn = 0.0
     end
     when nme == "INKEY" then do
-      call flush_out
+      call creio..flush
       fh = h_in
       c = ""
       assembler freadcdpt c, fh
@@ -2827,7 +2795,7 @@ builtin: procedure = .void
           end
           fh = fl_id[k]
         end
-        else call flush_out
+        else call creio..flush
         rs = ""
         do i = 1 to n
           c = ""
@@ -3418,7 +3386,7 @@ read_text_line: procedure = .string
   e = .int
   line = .string
   if n = 0 then do
-    call flush_out
+    call creio..flush
     fh = h_in
   end
   else do
@@ -3778,10 +3746,10 @@ report_error: procedure = .void
   li = .int
   s = .string
   li = tk_l[stmt_pc]
-  call flush_out
+  call creio..flush
   if li >= 1 & ln_num[li] >= 0 then s = last_error_text || " in " || ln_num[li]
   else s = last_error_text || " in line " || li
-  call errs s || '0a'x
+  call creio..err s || '0a'x
   return
 
 handle_error: procedure = .int
@@ -4786,7 +4754,7 @@ do_sleep: procedure = .void
   c = .string
   fh = .int
   pc = pc + 1
-  call flush_out
+  call creio..flush
   if at_end() = 1 then do
     fh = h_in
     c = ""
@@ -4823,7 +4791,7 @@ run_program: procedure = .void
   running = 1
   call run_loop
   call close_all
-  call flush_out
+  call creio..flush
   running = 0
   return
 
@@ -4940,9 +4908,9 @@ repl: procedure = .void
     line = strip(line)
     if line == "" then iterate
     u = upper(line)
-    if isdigit(left(line, 1)) = 1 then do
+    if cretext..isdigit(left(line, 1)) = 1 then do
       j = 1
-      do while j <= length(line) & isdigit(substr(line, j, 1)) = 1
+      do while j <= length(line) & cretext..isdigit(substr(line, j, 1)) = 1
         j = j + 1
       end
       num = left(line, j - 1) as .int
@@ -4979,9 +4947,9 @@ repl: procedure = .void
       retflag = 0
       pc = ln_start[nlines]
       call run_loop
-      call flush_out
+      call creio..flush
     end
   end
   call close_all
-  call flush_out
+  call creio..flush
   return

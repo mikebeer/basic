@@ -5,13 +5,30 @@
 # The interpreter is compiled to bytecode on first use (about half a minute),
 # afterwards it starts in under a second.  Set CREXX to the crexx driver if it
 # is not on your PATH.
+# The interpreter uses the CREXX Language Environment (CRE), included as the
+# git submodule "cre" (https://github.com/mikebeer/language_environment).
 DIR=$(cd "$(dirname "$0")" && pwd)
 CREXX=${CREXX:-crexx}
-if [ ! -f "$DIR/basic.rxbin" ] || [ "$DIR/basic.crexx" -nt "$DIR/basic.rxbin" ]; then
+CRESRC="$DIR/cre/src"
+if [ ! -f "$CRESRC/cretext.crexx" ]; then
+  echo "basic: CRE not found - run: git submodule update --init" >&2
+  exit 2
+fi
+CRELIBS=""
+for m in crecond creio crenum cretext; do
+  CRELIBS="$CRELIBS -l $CRESRC/$m.rxbin"
+  if [ ! -f "$CRESRC/$m.rxbin" ] || [ "$CRESRC/$m.crexx" -nt "$CRESRC/$m.rxbin" ]; then
+    "$CREXX" "$CRESRC/$m.crexx" -noexec >/dev/null 2>&1 || {
+      echo "basic: compilation of CRE module $m failed" >&2
+      exit 2
+    }
+  fi
+done
+if [ ! -f "$DIR/basic.rxbin" ] || [ "$DIR/basic.crexx" -nt "$DIR/basic.rxbin" ] || [ "$CRESRC/cretext.rxbin" -nt "$DIR/basic.rxbin" ]; then
   echo "basic: compiling interpreter (first run only)..." >&2
-  "$CREXX" "$DIR/basic.crexx" -noexec >/dev/null 2>&1 || {
-    echo "basic: compilation failed - run: $CREXX $DIR/basic.crexx -noexec" >&2
+  "$CREXX" "$DIR/basic.crexx" -i "$CRESRC" -noexec >/dev/null 2>&1 || {
+    echo "basic: compilation failed - run: $CREXX $DIR/basic.crexx -i $CRESRC -noexec" >&2
     exit 2
   }
 fi
-exec "$CREXX" "$DIR/basic.crexx" -nocompile -args "$@"
+exec "$CREXX" "$DIR/basic.crexx" -nocompile $CRELIBS -args "$@"
