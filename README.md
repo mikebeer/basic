@@ -45,6 +45,20 @@ the program (`COMMAND$`).
 * `-ansi` - `CLS`, `LOCATE` and `COLOR` emit ANSI escape codes (they are
   silent no-ops otherwise, so redirected output stays clean).
 
+## C version
+
+[`c/`](c/README.md) is a port of the interpreter to strict ISO C89 (one file,
+`c/basic_all.c`, plus a 71-column card deck for VM/370).  It passes the same
+`tests/` with identical output and needs no CREXX:
+
+```sh
+cd c && make && make test      # also: make strict, make deck, make bench
+./basic ../examples/hello.bas
+```
+
+`bench/` holds five benchmark programs that run under both versions
+(`bench/run_bench.sh [./basic]`).
+
 ## Supported language
 
 **Statements** - `PRINT` / `?` (`;` `,` `TAB` `SPC`, `#n,` file output),
@@ -94,4 +108,6 @@ significant digits (no single-precision rounding).
 | `basic` | launcher script (compiles on first use) |
 | `docs/` | the Language Reference and User's Guide (Word and PDF) |
 | `examples/` | sample programs in both dialects |
-| `tests/` | regression programs with expected output (`tests/run_tests.sh`) |
+| `tests/` | regression programs with expected output (`tests/run_tests.sh`), shared by both versions |
+| `c/` | the C89 port (`c/README.md`); `c/basic_all.c` is the single-file source |
+| `bench/` | benchmark programs for both versions |

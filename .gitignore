@@ -1,3 +1,8 @@
 *.rxbin
 *.rxas
 *.lock
+/c/basic
+/c/strict_san
+/c/strict_run.txt
+/c/strict_tmp.o
+/c/strict_syms.txt
